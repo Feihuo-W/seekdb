@@ -8,7 +8,8 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends ca-certificates g++ cmake make \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY minivectordb/ /build/minivectordb/
+COPY minivectordb/CMakeLists.txt /build/minivectordb/CMakeLists.txt
+COPY minivectordb/src/ /build/minivectordb/src/
 RUN cmake -S /build/minivectordb -B /build/out -DCMAKE_BUILD_TYPE=Release \
  && cmake --build /build/out -j"$(nproc)"
 
@@ -17,4 +18,5 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN mkdir -p /data
 COPY --from=build /build/out/minivectordb /usr/local/bin/minivectordb
 VOLUME ["/data"]
+STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/minivectordb", "--data", "/data"]

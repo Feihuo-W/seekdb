@@ -2,3 +2,4 @@
 *
 !minivectordb/
 !minivectordb/**
+minivectordb/build/
