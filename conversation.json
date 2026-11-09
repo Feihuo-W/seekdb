@@ -1,0 +1,106 @@
+{
+  "material_version": "minivectordb-conversation-v1",
+  "rule_version": "agent-learning-evidence-v3-unbounded",
+  "synthetic": false,
+  "project": {
+    "name": "MiniVectorDB",
+    "competition_branch": "2026-competition-round2",
+    "date": "2026-11-09",
+    "language": "C++17",
+    "artifacts": ["minivectordb/src", "minivectordb/tools/run_cases.py", "minivectordb/README.md", "Dockerfile", "conversation.json"]
+  },
+  "attribution": "本文件按来源区分内容：user_prompts 是学生本人在本次会话中的原始输入（原文）；conversations 是 Agent 的执行说明；experiments 是 Agent 在本机运行的真实命令与截取输出。没有学生本人独立提出的技术解释、预测或反例，因此本材料不声称存在对应的学生理解证据。",
+  "user_prompts": [
+    {
+      "id": "u1",
+      "content": "拉取题目最新的加赛分支"
+    },
+    {
+      "id": "u2",
+      "content": "请你记录好加赛题内容",
+      "note": "学生粘贴了加赛题一《完成一个轻量向量数据库》的完整题面，要求记录。Agent 将其整理为 2026题目/加赛-赛题一-轻量向量数据库MiniVectorDB.md 并更新目录。"
+    },
+    {
+      "id": "u3",
+      "content": "注意拉取到新分支，不要和已有分支混淆",
+      "note": "学生要求在独立的新分支上拉取加赛代码，避免与 fix/2026-06-worker-sql-ready、amd-v5-verified 等既有分支混在一起。Agent 新建本地分支 2026-competition-round2 跟踪 origin/2026-competition-round2，未合并、未改动既有分支。"
+    },
+    {
+      "id": "u4",
+      "content": "拉取之后你就可以开始做题了"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "c1",
+      "source": "agent",
+      "content": "识别出加赛分支为 origin/2026-competition-round2（最新提交 9f6df2ba5，upload more cases），创建独立本地跟踪分支并检出；确认既有分支指针未变化。"
+    },
+    {
+      "id": "c2",
+      "source": "agent",
+      "content": "阅读 mysqltest/README.md、manifest.json 与 20 个公开用例的 .test/.result，确定驱动语义：每行一条 SQL、每条 SQL 对应一个 JSON 断言；--restart 复用数据目录；--mode ann 切换模式；空对象表示成功，error 表示非空错误码对齐。"
+    },
+    {
+      "id": "c3",
+      "source": "agent",
+      "content": "实现 C++17 单机引擎：手写词法/递归下降解析器；WAL+快照持久化到 /data；单显式事务 overlay；启动重放已提交事务；精确 TopK 与过滤后 TopK；AVX2/FMA 距离计算。"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "e1",
+      "source": "tool",
+      "question": "公开题包 20 个用例是否能全部通过？",
+      "command": "python3 minivectordb/tools/run_cases.py",
+      "result": "20/20 cases passed",
+      "interpretation": "首次运行即全部通过；用例覆盖 CRUD、排序、主键冲突、持久化重启、过滤后 TopK、float32 语义、索引维护、事务失败原子性与正常关闭回滚。"
+    },
+    {
+      "id": "e2",
+      "source": "tool",
+      "question": "进程被强杀后，已提交数据是否保留、未提交事务是否整体丢弃？",
+      "command": "python3 /tmp/crash_test.py（BEGIN + UPDATE + INSERT 后 kill -9，再重启查询）",
+      "result": "after crash sel {\"columns\":[\"id\",\"s\"],\"rows\":[[1,\"a\"],[2,\"b\"]]}；after crash2 中 id=2 返回 \"q\"",
+      "interpretation": "未提交事务的两条修改都未出现；提交后的修改在强杀后保留，符合“确认提交必须持久、未提交不得部分生效”的要求。"
+    },
+    {
+      "id": "e3",
+      "source": "tool",
+      "question": "基准形状（10k 行、128 维、1000 次 TopK）的耗时与内存如何？",
+      "command": "python3 /tmp/bench.py",
+      "result": "insert 10000 rows in 2.30s；1000 queries in 0.58s；VmHWM 10.7MB；restart+first query 0.02s",
+      "interpretation": "优化前查询为 2.51s，定位到 TopK 路径对每个候选行都构造输出值与字符串；改为先算距离、仅对入选行构造结果后降至 0.58s（约 4.3 倍）。"
+    },
+    {
+      "id": "e4",
+      "source": "tool",
+      "question": "WAL 增长后的压缩路径是否安全？",
+      "command": "python3 /tmp/compact_test.py（40k 行 × 128 维，正常关闭触发压缩，重启后查询）",
+      "result": "shutdown 0.15s；files snapshot.dat 22199517 bytes；post sel 返回 [7,\"zz\"],[9,\"c9\"]；top3 距离正常",
+      "interpretation": "快照写入并原子替换后截断 WAL；重启加载快照得到一致的提交状态，更新与删除在压缩后依然生效。"
+    },
+    {
+      "id": "e5",
+      "source": "tool",
+      "question": "数据量明显大于常驻结构时，扫描是否仍保持内存有界？",
+      "command": "python3 /tmp/mem_test.py（200k 行 × 16 维，过滤查询、过滤后 TopK、恢复期连续强杀）",
+      "result": "insert 200k；VmHWM 37MB（数据文件约 22MB）；三次在启动 10ms 内强杀后重启查询 0.08s 返回正确行",
+      "interpretation": "内存约为数据文件的 1.7 倍（含页缓存），未整表载入；恢复只读不写，恢复中再次被杀仍可重复恢复。"
+    },
+    {
+      "id": "e6",
+      "source": "tool",
+      "question": "非法向量与不支持语句是否返回明确错误？",
+      "command": "python3 /tmp/edge_test.py",
+      "result": "NaN/Infinity/1e40 -> invalid_vector；[1,2] 对 VECTOR(3) -> dimension_mismatch；DROP TABLE -> unsupported_sql；BEGIN 中再次 BEGIN -> transaction_state_error；重复主键 -> duplicate_key",
+      "interpretation": "错误语义与公开结果文件中的命名一致，失败语句不留下部分修改（同批其余行未写入）。"
+    }
+  ],
+  "retrospective": "本轮工作由 Agent 主导完成：先按公开题包反推协议，再实现存储/事务/查询，最后用真实测试暴露并修复了 TopK 路径的分配瓶颈（2.51s→0.58s）。仍然存在的取舍是 ANN 用精确扫描实现：召回率恒为 1.0，但查询成本随行数线性增长；主键到行偏移的常驻映射换取了随机访问速度，行数极大时映射自身会成为内存下限。",
+  "limitations": [
+    "学生在本次材料窗口内只给出了任务指令，没有留下独立的技术解释、预测、反例或对 Agent 结论的质疑，因此不能把 Agent 的规划与实现计入学生学习证据。",
+    "未实现真正的近似索引；ann 模式当前返回精确结果。",
+    "未实现 NULL、JOIN、聚合、子查询、ALTER TABLE、外键、嵌套事务与主键更新，均返回 unsupported_sql。"
+  ]
+}
