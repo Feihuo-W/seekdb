@@ -54,8 +54,8 @@ class Lexer {
                  (c == '.' && pos_ + 1 < s_.size() &&
                   std::isdigit(static_cast<unsigned char>(s_[pos_ + 1])))) {
         out.push_back(Number());
-      } else if (c == '\'') {
-        out.push_back(String());
+      } else if (c == '\'' || c == '"') {
+        out.push_back(String(c));
       } else if (c == '[') {
         out.push_back(VectorOrPunct());
       } else {
@@ -144,14 +144,14 @@ class Lexer {
     return t;
   }
 
-  Token String() {
+  Token String(char quote) {
     ++pos_;  // opening quote
     std::string out;
     while (pos_ < s_.size()) {
       char c = s_[pos_];
-      if (c == '\'') {
-        if (pos_ + 1 < s_.size() && s_[pos_ + 1] == '\'') {
-          out.push_back('\'');
+      if (c == quote) {
+        if (pos_ + 1 < s_.size() && s_[pos_ + 1] == quote) {
+          out.push_back(quote);
           pos_ += 2;
           continue;
         }

@@ -38,24 +38,24 @@ std::string Trim(const std::string& s) {
 // Splits a line on semicolons outside single-quoted strings.
 void SplitStatements(const std::string& line, std::vector<std::string>* out) {
   std::string cur;
-  bool in_str = false;
+  char quote = 0;
   for (size_t i = 0; i < line.size(); ++i) {
     char c = line[i];
-    if (in_str) {
+    if (quote != 0) {
       cur.push_back(c);
       if (c == '\\' && i + 1 < line.size()) {
         cur.push_back(line[++i]);
-      } else if (c == '\'') {
-        if (i + 1 < line.size() && line[i + 1] == '\'') {
+      } else if (c == quote) {
+        if (i + 1 < line.size() && line[i + 1] == quote) {
           cur.push_back(line[++i]);
         } else {
-          in_str = false;
+          quote = 0;
         }
       }
       continue;
     }
-    if (c == '\'') {
-      in_str = true;
+    if (c == '\'' || c == '"') {
+      quote = c;
       cur.push_back(c);
       continue;
     }
@@ -74,19 +74,19 @@ void SplitStatements(const std::string& line, std::vector<std::string>* out) {
 // Returns 0 when quotes/parens are balanced, 1 when more input is needed,
 // -1 when a closing paren appears without an opener.
 int Balance(const std::string& s) {
-  bool in_str = false;
+  char quote = 0;
   bool in_tick = false;
   int depth = 0;
   for (size_t i = 0; i < s.size(); ++i) {
     char c = s[i];
-    if (in_str) {
+    if (quote != 0) {
       if (c == '\\' && i + 1 < s.size()) {
         ++i;
-      } else if (c == '\'') {
-        if (i + 1 < s.size() && s[i + 1] == '\'') {
+      } else if (c == quote) {
+        if (i + 1 < s.size() && s[i + 1] == quote) {
           ++i;
         } else {
-          in_str = false;
+          quote = 0;
         }
       }
       continue;
@@ -95,8 +95,8 @@ int Balance(const std::string& s) {
       if (c == '`') in_tick = false;
       continue;
     }
-    if (c == '\'') {
-      in_str = true;
+    if (c == '\'' || c == '"') {
+      quote = c;
     } else if (c == '`') {
       in_tick = true;
     } else if (c == '(') {
@@ -105,7 +105,7 @@ int Balance(const std::string& s) {
       if (--depth < 0) return -1;
     }
   }
-  return (in_str || in_tick || depth > 0) ? 1 : 0;
+  return (quote != 0 || in_tick || depth > 0) ? 1 : 0;
 }
 
 }  // namespace
@@ -140,7 +140,16 @@ int main(int argc, char** argv) {
   std::string line;
   std::string pending;
   bool stop = false;
+  bool first_line = true;
   while (!stop && std::getline(std::cin, line)) {
+    if (first_line) {
+      first_line = false;
+      if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
+          static_cast<unsigned char>(line[1]) == 0xBB &&
+          static_cast<unsigned char>(line[2]) == 0xBF) {
+        line.erase(0, 3);
+      }
+    }
     std::string stmt = Trim(line);
     if (stmt.empty()) continue;
     if (pending.empty() && stmt.rfind("--", 0) == 0) {
@@ -149,6 +158,7 @@ int main(int argc, char** argv) {
       if (rest == "restart") break;
       if (rest.rfind("mode", 0) == 0) {
         std::string mode = Trim(rest.substr(4));
+        if (!mode.empty() && mode[0] == '=') mode = Trim(mode.substr(1));
         engine.SetAnnMode(mode == "ann");
         continue;
       }
