@@ -85,9 +85,9 @@ BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
 - 压缩：WAL 超过 128 MiB 或正常关闭且超过 16 MiB 时，把当前可见行重写为
   `snapshot.tmp`，`fsync` 后原子 `rename`，再截断 WAL；崩溃发生在任一窗口都可由
   “快照 + 完整 WAL 重放”得到一致状态。
-- 向量检索：精确扫描 + AVX2/FMA 距离计算，TopK 用大小为 K 的堆；入选结果再用
-  double 复核距离并按主键打破并列。`ann` 模式当前同样返回精确结果（Recall@K=1.0）。
-  索引创建信息随 schema 持久化，增删改始终作用于当前可见记录。
+- 向量检索：精确扫描 + AVX2/FMA 距离计算；TopK 先用 float32 距离保留 `K + max(3K,64)`
+  个候选，再用 double 复核距离、按主键打破并列并截断到 K。`ann` 模式当前同样返回精确
+  结果（Recall@K=1.0）。索引创建信息随 schema 持久化，增删改始终作用于当前可见记录。
 
 ## 已知限制
 
@@ -102,4 +102,5 @@ BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
 ```bash
 python3 minivectordb/tools/run_cases.py            # 运行 mysqltest 公开样例
 python3 minivectordb/tools/run_cases.py --filter vector
+python3 minivectordb/tools/fuzz_diff.py --seeds 10 --steps 200   # 与独立参考模型对拍
 ```

@@ -1,6 +1,7 @@
 #include "engine.h"
 
 #include <cerrno>
+#include <cstdlib>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1281,20 +1282,26 @@ std::string Engine::ExecSelect(const Statement& st) {
 
   if (distance_order) {
     size_t k = static_cast<size_t>(st.limit);
-    auto worse = [](const RowRes& a, const RowRes& b) {
-      if (a.dist != b.dist) return a.dist > b.dist;
-      return a.pk > b.pk;
+    // Keep a margin of candidates selected with the fast float32 distance, then
+    // re-rank them with the exact double distance and cut down to K. This keeps
+    // exact mode exact at the K boundary without paying double cost per row.
+    size_t k_candidates = k == 0 ? 0 : k + std::max<size_t>(k * 3, 64);
+    // priority_queue keeps the "largest" element on top; with this ordering the
+    // largest is the worst candidate (largest distance, then largest primary key).
+    auto worse_first = [](const RowRes& a, const RowRes& b) {
+      if (a.dist != b.dist) return a.dist < b.dist;
+      return a.pk < b.pk;
     };
-    std::priority_queue<RowRes, std::vector<RowRes>, decltype(worse)> heap(worse);
+    std::priority_queue<RowRes, std::vector<RowRes>, decltype(worse_first)> heap(worse_first);
     ForEachRow(*t, [&](int64_t pk, const RowView& v) {
-      if (k == 0) return;
+      if (k_candidates == 0) return;
       if (!EvalPredicates(conds, v)) return;
       const uint8_t* p = nullptr;
       uint32_t len = 0;
       if (!ColAt(v, s, dist_col, &p, &len)) return;
       double dist = L2Distance(reinterpret_cast<const float*>(p), query_vec.data(),
                                static_cast<int>(query_vec.size()));
-      if (heap.size() < k) {
+      if (heap.size() < k_candidates) {
         heap.push(make_res(pk, v, dist));
       } else {
         const RowRes& top = heap.top();
@@ -1317,6 +1324,7 @@ std::string Engine::ExecSelect(const Statement& st) {
       if (a.dist != b.dist) return a.dist < b.dist;
       return a.pk < b.pk;
     });
+    if (results.size() > k) results.resize(k);
   } else {
     bool limit_stop = orders.empty() && st.limit >= 0;
     ForEachRow(*t, [&](int64_t pk, const RowView& v) {
