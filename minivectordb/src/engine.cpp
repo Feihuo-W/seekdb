@@ -1324,14 +1324,13 @@ std::string Engine::ExecSelect(const Statement& st) {
       return a.pk < b.pk;
     };
     std::priority_queue<RowRes, std::vector<RowRes>, decltype(worse_first)> heap(worse_first);
+    const uint32_t vec_off = s.fixed_off[dist_col];
+    const float* qptr = query_vec.data();
+    const int qdim = static_cast<int>(query_vec.size());
     ForEachRow(*t, [&](int64_t pk, const RowView& v) {
       if (k_candidates == 0) return;
       if (!EvalPredicates(conds, v)) return;
-      const uint8_t* p = nullptr;
-      uint32_t len = 0;
-      if (!ColAt(v, s, dist_col, &p, &len)) return;
-      double dist = L2Squared(reinterpret_cast<const float*>(p), query_vec.data(),
-                              static_cast<int>(query_vec.size()));
+      double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
       if (heap.size() < k_candidates) {
         heap.push(make_res(pk, v, dist));
       } else {
