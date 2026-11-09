@@ -114,7 +114,7 @@
       "id": "e8",
       "source": "tool",
       "question": "多表事务、语句失败原子性、ann 模式一致性以及百万行规模是否满足正式要求？",
-      "command": "本地临时脚本（未入库）：多表 BEGIN/ROLLBACK/COMMIT + 重启核对；事务内超长 VARCHAR、维度不符、重复主键；CREATE VECTOR INDEX 后 exact 与 ann 对比；1,000,000 行 × 32 维写入、过滤 TopK、压缩与恢复",
+      "command": "python3 minivectordb/tools/scenario_checks.py（多表事务、语句失败原子性、双引号与表级主键、ann/exact 等价、强杀回滚）；规模场景见 e9/e10",
       "result": "多表事务提交/回滚与重启后状态一致；三类失败语句均返回 value_too_long / dimension_mismatch / duplicate_key，且此前修改保留、失败语句无部分生效；ann 与 exact 结果完全相同（重启后仍一致）；1,000,000 行写入 32.7s，过滤后 TopK 0.044s，峰值内存 231MB，关闭压缩后 snapshot 164MB，重启恢复 0.53s。",
       "interpretation": "这些场景公开题包未覆盖或只有小数据版本；结果说明事务原子性、多表一致性与大数据扫描路径在实现中成立。内存随数据规模增长主要来自 mmap 文件页，行数据不常驻堆内存。"
     },

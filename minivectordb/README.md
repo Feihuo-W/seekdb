@@ -104,4 +104,6 @@ python3 minivectordb/tools/run_cases.py            # 运行 mysqltest 公开样�
 python3 minivectordb/tools/run_cases.py --filter vector
 python3 minivectordb/tools/fuzz_diff.py --seeds 10 --steps 200   # 与独立参考模型对拍
 python3 minivectordb/tools/fuzz_diff.py --crash --seeds 10 --steps 200  # 随机强杀（含恢复期）
+python3 minivectordb/tools/scenario_checks.py    # 多表事务/原子性/引号/ANN/崩溃回滚
+python3 minivectordb/tools/scenario_checks.py --scale-rows 500000 --scale-dim 64  # 压缩与恢复
 ```
