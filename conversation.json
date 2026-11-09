@@ -7,7 +7,13 @@
     "competition_branch": "2026-competition-round2",
     "date": "2026-11-09",
     "language": "C++17",
-    "artifacts": ["minivectordb/src", "minivectordb/tools/run_cases.py", "minivectordb/README.md", "Dockerfile", "conversation.json"]
+    "artifacts": [
+      "minivectordb/src",
+      "minivectordb/tools/run_cases.py",
+      "minivectordb/README.md",
+      "Dockerfile",
+      "conversation.json"
+    ]
   },
   "attribution": "本文件按来源区分内容：user_prompts 是学生本人在本次会话中的原始输入（原文）；conversations 是 Agent 的执行说明；experiments 是 Agent 在本机运行的真实命令与截取输出。没有学生本人独立提出的技术解释、预测或反例，因此本材料不声称存在对应的学生理解证据。",
   "user_prompts": [
@@ -95,9 +101,17 @@
       "command": "python3 /tmp/edge_test.py",
       "result": "NaN/Infinity/1e40 -> invalid_vector；[1,2] 对 VECTOR(3) -> dimension_mismatch；DROP TABLE -> unsupported_sql；BEGIN 中再次 BEGIN -> transaction_state_error；重复主键 -> duplicate_key",
       "interpretation": "错误语义与公开结果文件中的命名一致，失败语句不留下部分修改（同批其余行未写入）。"
+    },
+    {
+      "id": "e7",
+      "source": "tool",
+      "question": "公开用例都是小表，TopK 在行数大于 K 时是否仍然正确？",
+      "command": "python3 minivectordb/tools/fuzz_diff.py --seeds 20 --steps 200",
+      "result": "首轮 0/6 seeds 通过：14 行、LIMIT 10 时引擎返回 [11,3,6,7,1,2,0,4,9,8]，独立参考模型为 [11,5,3,6,10,7,13,1,2,0]。加入候选距离日志后确认扫描距离都正确，根因是优先队列比较器方向写反，top() 得到最优而非最差候选，于是淘汰了最好的行。修正比较器并改为 K+余量候选、再用 double 复核截断后，20/20 seeds × 200 步通过，公开用例仍 20/20。",
+      "interpretation": "公开题包的行数都不超过 K，因此不会触发淘汰路径；用独立模型做差分测试才覆盖到该缺陷。该缺陷会直接导致正式准入的 TopK 用例失败。"
     }
   ],
-  "retrospective": "本轮工作由 Agent 主导完成：先按公开题包反推协议，再实现存储/事务/查询，最后用真实测试暴露并修复了 TopK 路径的分配瓶颈（2.51s→0.58s）。仍然存在的取舍是 ANN 用精确扫描实现：召回率恒为 1.0，但查询成本随行数线性增长；主键到行偏移的常驻映射换取了随机访问速度，行数极大时映射自身会成为内存下限。",
+  "retrospective": "本轮工作由 Agent 主导完成：先按公开题包反推协议，再实现存储/事务/查询，最后用公开用例、崩溃/压缩/内存测试与独立模型差分测试逐步加固。过程中确实暴露并修复了两类问题：TopK 路径的逐行分配瓶颈（2.51s→0.58s），以及大表 TopK 堆比较器方向错误（公开用例因行数≤K 无法发现）。仍然存在的取舍是 ANN 用精确扫描实现：召回率恒为 1.0，但查询成本随行数线性增长；主键到行偏移的常驻映射换取了随机访问速度，行数极大时映射自身会成为内存下限。",
   "limitations": [
     "学生在本次材料窗口内只给出了任务指令，没有留下独立的技术解释、预测、反例或对 Agent 结论的质疑，因此不能把 Agent 的规划与实现计入学生学习证据。",
     "未实现真正的近似索引；ann 模式当前返回精确结果。",
