@@ -1,3 +1,4 @@
 # Keep the build context limited to the MiniVectorDB sources.
 *
 !minivectordb/
+!minivectordb/**
