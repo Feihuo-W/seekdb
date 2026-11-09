@@ -663,9 +663,23 @@ bool Engine::BindQueryVector(const Column& col, const Literal& lit, std::vector<
 
 template <typename F>
 void Engine::ForEachRow(const TableState& t, F&& fn) const {
-  static const std::map<int64_t, OverlayRow> kEmpty;
   auto oit = overlay_.find(t.schema.id);
-  const std::map<int64_t, OverlayRow>& ov = oit == overlay_.end() ? kEmpty : oit->second;
+  bool has_overlay = oit != overlay_.end() && !oit->second.empty();
+  if (!has_overlay) {
+    if (t.scan_dirty) {
+      t.scan.clear();
+      t.scan.reserve(t.rows.size());
+      for (const auto& kv : t.rows) t.scan.emplace_back(kv.first, kv.second);
+      t.scan_dirty = false;
+    }
+    for (const auto& kv : t.scan) {
+      RowView v = MakeView(kv.second);
+      v.s = &t.schema;
+      if (v.Valid()) fn(kv.first, v);
+    }
+    return;
+  }
+  const std::map<int64_t, OverlayRow>& ov = oit->second;
   auto ib = t.rows.begin();
   auto ie = t.rows.end();
   auto ob = ov.begin();
@@ -886,6 +900,7 @@ bool Engine::CommitOverlay() {
     } else {
       t->second.rows[a.pk] = RowRef{a.off, 1};
     }
+    t->second.scan_dirty = true;
   }
   overlay_.clear();
   dirty_since_compact_ = true;
@@ -1510,7 +1525,10 @@ bool Engine::Compact() {
   if (!OpenSnapshot()) return false;
   for (auto& [tid, ts] : tables_) {
     auto it = new_refs.find(tid);
-    if (it != new_refs.end()) ts.rows = std::move(it->second);
+    if (it != new_refs.end()) {
+      ts.rows = std::move(it->second);
+      ts.scan_dirty = true;
+    }
   }
   // Reset the WAL to a small empty file so a compacted database does not keep
   // the peak-sized mapping (and preallocated file) around.

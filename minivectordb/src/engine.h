@@ -66,6 +66,10 @@ class Engine {
   struct TableState {
     Schema schema;
     std::map<int64_t, RowRef> rows;
+    // Flat pk-ordered view of `rows` for sequential scans; rebuilt lazily after
+    // mutations so the hot scan path avoids red-black tree pointer chasing.
+    mutable std::vector<std::pair<int64_t, RowRef>> scan;
+    mutable bool scan_dirty = true;
   };
   struct OverlayRow {
     bool del = false;
