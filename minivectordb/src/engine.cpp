@@ -161,6 +161,34 @@ int Schema::FindCol(const std::string& lname) const {
   return -1;
 }
 
+uint32_t Schema::FixedWidth(int col) const {
+  const Column& c = cols[col];
+  return c.type.kind == ColumnType::BIGINT ? 8u : c.type.param * 4u;
+}
+
+void Schema::ComputeLayout() {
+  fixed_off.assign(cols.size(), UINT32_MAX);
+  varlen_off.assign(cols.size(), 0);
+  uint32_t off = 0;
+  nvarchar = 0;
+  for (size_t i = 0; i < cols.size(); ++i) {
+    if (cols[i].type.kind == ColumnType::VARCHAR) {
+      ++nvarchar;
+    } else {
+      fixed_off[i] = off;
+      off += FixedWidth(static_cast<int>(i));
+    }
+  }
+  fixed_size = off;
+  uint32_t lo = off;
+  for (size_t i = 0; i < cols.size(); ++i) {
+    if (cols[i].type.kind == ColumnType::VARCHAR) {
+      varlen_off[i] = lo;
+      lo += 4;
+    }
+  }
+}
+
 bool Engine::RowView::Valid() const { return p != nullptr && n > 0; }
 
 Engine::Engine(std::string dir) : dir_(std::move(dir)) {
@@ -484,6 +512,11 @@ void Engine::RegisterSchema(const Schema& s) {
       t->second.schema.id = id;
     }
   }
+  auto idit = table_ids_.find(s.name);
+  if (idit != table_ids_.end()) {
+    auto t = tables_.find(idit->second);
+    if (t != tables_.end()) t->second.schema.ComputeLayout();
+  }
   if (s.id >= next_table_id_) next_table_id_ = s.id + 1;
 }
 
@@ -497,71 +530,49 @@ Engine::TableState* Engine::FindTable(const std::string& lname) {
 
 std::string Engine::EncodeRow(const Schema& s, const std::vector<ColumnValue>& vals) const {
   std::string b;
-  b.reserve(32);
+  b.reserve(s.fixed_size + static_cast<size_t>(s.nvarchar) * 4 + 32);
   for (size_t c = 0; c < s.cols.size(); ++c) {
     const Column& col = s.cols[c];
-    switch (col.type.kind) {
-      case ColumnType::BIGINT:
-        PutI64(b, vals[c].i);
-        break;
-      case ColumnType::VARCHAR:
-        PutU32(b, static_cast<uint32_t>(vals[c].s.size()));
-        b += vals[c].s;
-        break;
-      case ColumnType::VECTOR:
-        for (uint32_t d = 0; d < col.type.param; ++d) PutF32(b, vals[c].v[d]);
-        break;
+    if (col.type.kind == ColumnType::BIGINT) {
+      PutI64(b, vals[c].i);
+    } else if (col.type.kind == ColumnType::VECTOR) {
+      for (uint32_t d = 0; d < col.type.param; ++d) PutF32(b, vals[c].v[d]);
     }
+  }
+  for (size_t c = 0; c < s.cols.size(); ++c) {
+    if (s.cols[c].type.kind == ColumnType::VARCHAR)
+      PutU32(b, static_cast<uint32_t>(vals[c].s.size()));
+  }
+  for (size_t c = 0; c < s.cols.size(); ++c) {
+    if (s.cols[c].type.kind == ColumnType::VARCHAR) b += vals[c].s;
   }
   return b;
 }
 
 std::vector<Engine::ColumnValue> Engine::DecodeRow(const Schema& s, const RowView& v) const {
   std::vector<ColumnValue> vals(s.cols.size());
-  size_t off = 0;
   for (size_t c = 0; c < s.cols.size(); ++c) {
     const Column& col = s.cols[c];
-    switch (col.type.kind) {
-      case ColumnType::BIGINT:
-        vals[c].i = GetI64(v.p + off);
-        off += 8;
-        break;
-      case ColumnType::VARCHAR: {
-        uint32_t len = GetU32(v.p + off);
-        off += 4;
-        vals[c].s.assign(reinterpret_cast<const char*>(v.p + off), len);
-        off += len;
-        break;
-      }
-      case ColumnType::VECTOR: {
-        vals[c].v.resize(col.type.param);
-        for (uint32_t d = 0; d < col.type.param; ++d) {
-          vals[c].v[d] = GetF32(v.p + off);
-          off += 4;
-        }
-        break;
-      }
+    if (col.type.kind == ColumnType::BIGINT) {
+      vals[c].i = GetI64(v.p + s.fixed_off[c]);
+    } else if (col.type.kind == ColumnType::VECTOR) {
+      vals[c].v.resize(col.type.param);
+      const uint8_t* p = v.p + s.fixed_off[c];
+      for (uint32_t d = 0; d < col.type.param; ++d) vals[c].v[d] = GetF32(p + d * 4);
     }
+  }
+  uint32_t data = s.fixed_size + static_cast<uint32_t>(s.nvarchar) * 4;
+  for (size_t c = 0; c < s.cols.size(); ++c) {
+    if (s.cols[c].type.kind != ColumnType::VARCHAR) continue;
+    uint32_t len = GetU32(v.p + s.varlen_off[c]);
+    vals[c].s.assign(reinterpret_cast<const char*>(v.p + data), len);
+    data += len;
   }
   return vals;
 }
 
 int64_t Engine::PkOf(const Schema& s, const RowView& v) const {
-  size_t off = 0;
-  for (int c = 0; c < static_cast<int>(s.cols.size()); ++c) {
-    const Column& col = s.cols[c];
-    if (c == s.pk) return GetI64(v.p + off);
-    switch (col.type.kind) {
-      case ColumnType::BIGINT: off += 8; break;
-      case ColumnType::VARCHAR: {
-        uint32_t len = GetU32(v.p + off);
-        off += 4 + len;
-        break;
-      }
-      case ColumnType::VECTOR: off += static_cast<size_t>(col.type.param) * 4; break;
-    }
-  }
-  return 0;
+  return GetI64(v.p + s.fixed_off[s.pk]);
 }
 
 const uint8_t* Engine::RowPayload(const RowRef& ref, uint32_t* len) const {
@@ -724,33 +735,22 @@ namespace {
 
 bool ColAt(const Engine::RowView& v, const Schema& s, int col, const uint8_t** p,
            uint32_t* len) {
-  size_t off = 0;
-  for (int c = 0; c < col; ++c) {
-    switch (s.cols[c].type.kind) {
-      case ColumnType::BIGINT: off += 8; break;
-      case ColumnType::VARCHAR: {
-        uint32_t l = GetU32(v.p + off);
-        off += 4 + l;
-        break;
-      }
-      case ColumnType::VECTOR: off += static_cast<size_t>(s.cols[c].type.param) * 4; break;
-    }
-  }
-  const Column& target = s.cols[col];
-  if (target.type.kind == ColumnType::BIGINT) {
+  if (s.fixed_off[col] != UINT32_MAX) {
+    uint32_t off = s.fixed_off[col];
+    uint32_t w = s.FixedWidth(col);
+    if (static_cast<size_t>(off) + w > v.n) return false;
     *p = v.p + off;
-    *len = 8;
+    *len = w;
     return true;
   }
-  if (target.type.kind == ColumnType::VARCHAR) {
-    uint32_t l = GetU32(v.p + off);
-    if (off + 4 + l > v.n) return false;
-    *p = v.p + off + 4;
-    *len = l;
-    return true;
+  uint32_t l = GetU32(v.p + s.varlen_off[col]);
+  uint32_t off = s.fixed_size + static_cast<uint32_t>(s.nvarchar) * 4;
+  for (int c = 0; c < col; ++c) {
+    if (s.cols[c].type.kind == ColumnType::VARCHAR) off += GetU32(v.p + s.varlen_off[c]);
   }
+  if (static_cast<size_t>(off) + l > v.n) return false;
   *p = v.p + off;
-  *len = target.type.param * 4;
+  *len = l;
   return true;
 }
 
@@ -789,16 +789,26 @@ namespace {
 
 #if defined(__x86_64__)
 __attribute__((target("avx2,fma"))) float L2SqAvx2(const float* a, const float* b, int dim) {
-  __m256 acc = _mm256_setzero_ps();
+  __m256 a0 = _mm256_setzero_ps();
+  __m256 a1 = a0, a2 = a0, a3 = a0;
   int i = 0;
-  for (; i + 8 <= dim; i += 8) {
-    __m256 va = _mm256_loadu_ps(a + i);
-    __m256 vb = _mm256_loadu_ps(b + i);
-    __m256 d = _mm256_sub_ps(va, vb);
-    acc = _mm256_fmadd_ps(d, d, acc);
+  for (; i + 32 <= dim; i += 32) {
+    __m256 d0 = _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i));
+    __m256 d1 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 8), _mm256_loadu_ps(b + i + 8));
+    __m256 d2 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 16), _mm256_loadu_ps(b + i + 16));
+    __m256 d3 = _mm256_sub_ps(_mm256_loadu_ps(a + i + 24), _mm256_loadu_ps(b + i + 24));
+    a0 = _mm256_fmadd_ps(d0, d0, a0);
+    a1 = _mm256_fmadd_ps(d1, d1, a1);
+    a2 = _mm256_fmadd_ps(d2, d2, a2);
+    a3 = _mm256_fmadd_ps(d3, d3, a3);
   }
+  for (; i + 8 <= dim; i += 8) {
+    __m256 d = _mm256_sub_ps(_mm256_loadu_ps(a + i), _mm256_loadu_ps(b + i));
+    a0 = _mm256_fmadd_ps(d, d, a0);
+  }
+  __m256 s = _mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3));
   float lanes[8];
-  _mm256_storeu_ps(lanes, acc);
+  _mm256_storeu_ps(lanes, s);
   float sum = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3])) +
               ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
   for (; i < dim; ++i) {
@@ -811,17 +821,17 @@ __attribute__((target("avx2,fma"))) float L2SqAvx2(const float* a, const float* 
 
 }  // namespace
 
-double Engine::L2Distance(const float* a, const float* b, int dim) const {
+double Engine::L2Squared(const float* a, const float* b, int dim) const {
 #if defined(__x86_64__)
   static const bool avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
-  if (avx2) return std::sqrt(static_cast<double>(L2SqAvx2(a, b, dim)));
+  if (avx2) return static_cast<double>(L2SqAvx2(a, b, dim));
 #endif
   double sum = 0.0;
   for (int i = 0; i < dim; ++i) {
     double d = static_cast<double>(a[i]) - static_cast<double>(b[i]);
     sum += d * d;
   }
-  return std::sqrt(sum);
+  return sum;
 }
 
 bool Engine::CommitOverlay() {
@@ -1131,7 +1141,7 @@ std::string Engine::ExecSelect(const Statement& st) {
     OutVal out;
     if (it.kind == 2) {
       out.kind = OutVal::FLT;
-      out.f = dist;
+      out.f = std::sqrt(dist);
       return out;
     }
     const uint8_t* p = nullptr;
@@ -1230,7 +1240,13 @@ std::string Engine::ExecSelect(const Statement& st) {
     const uint8_t* p = nullptr;
     uint32_t len = 0;
     ColAt(v, s, vcol, &p, &len);
-    return L2Distance(reinterpret_cast<const float*>(p), q.data(), static_cast<int>(q.size()));
+    const float* a = reinterpret_cast<const float*>(p);
+    double sum = 0.0;
+    for (size_t i = 0; i < q.size(); ++i) {
+      double d = static_cast<double>(a[i]) - static_cast<double>(q[i]);
+      sum += d * d;
+    }
+    return sum;
   };
 
   std::vector<float> query_vec;
@@ -1277,7 +1293,7 @@ std::string Engine::ExecSelect(const Statement& st) {
       double d = static_cast<double>(a[i]) - static_cast<double>(query_vec[i]);
       sum += d * d;
     }
-    return std::sqrt(sum);
+    return sum;
   };
 
   if (distance_order) {
@@ -1299,8 +1315,8 @@ std::string Engine::ExecSelect(const Statement& st) {
       const uint8_t* p = nullptr;
       uint32_t len = 0;
       if (!ColAt(v, s, dist_col, &p, &len)) return;
-      double dist = L2Distance(reinterpret_cast<const float*>(p), query_vec.data(),
-                               static_cast<int>(query_vec.size()));
+      double dist = L2Squared(reinterpret_cast<const float*>(p), query_vec.data(),
+                              static_cast<int>(query_vec.size()));
       if (heap.size() < k_candidates) {
         heap.push(make_res(pk, v, dist));
       } else {

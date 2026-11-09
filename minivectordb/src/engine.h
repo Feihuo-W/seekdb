@@ -23,7 +23,18 @@ struct Schema {
   int vec = -1;
   bool has_vec_index = false;
 
+  // Runtime row layout: fixed-width columns (BIGINT/VECTOR) first, then one u32
+  // byte-length per VARCHAR, then the VARCHAR bytes. Fixed columns therefore have
+  // a constant offset independent of string lengths, which keeps the scan hot path
+  // free of per-row column walking.
+  std::vector<uint32_t> fixed_off;   // UINT32_MAX for VARCHAR columns
+  std::vector<uint32_t> varlen_off;  // offset of the u32 length (VARCHAR only)
+  uint32_t fixed_size = 0;
+  int nvarchar = 0;
+
   int FindCol(const std::string& lname) const;
+  void ComputeLayout();
+  uint32_t FixedWidth(int col) const;
 };
 
 class Engine {
@@ -128,7 +139,7 @@ class Engine {
   bool BuildPredicates(const Schema& s, const std::vector<Condition>& conds,
                        std::vector<CondBound>* out, std::string& err) const;
   bool EvalPredicates(const std::vector<CondBound>& conds, const RowView& row) const;
-  double L2Distance(const float* a, const float* b, int dim) const;
+  double L2Squared(const float* a, const float* b, int dim) const;
 
   std::string dir_;
   bool ok_ = true;
