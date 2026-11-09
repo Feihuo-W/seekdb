@@ -145,6 +145,7 @@ int main(int argc, char** argv) {
     if (stmt.empty()) continue;
     if (pending.empty() && stmt.rfind("--", 0) == 0) {
       std::string rest = Lower(Trim(stmt.substr(2)));
+      while (!rest.empty() && rest.back() == ';') rest = Trim(rest.substr(0, rest.size() - 1));
       if (rest == "restart") break;
       if (rest.rfind("mode", 0) == 0) {
         std::string mode = Trim(rest.substr(4));
