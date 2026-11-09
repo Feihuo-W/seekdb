@@ -125,6 +125,11 @@ class Conn:
         self.p.wait(timeout=30)
         self.err.close()
 
+    def crash(self):
+        self.p.kill()
+        self.p.wait()
+        self.err.close()
+
     def close(self):
         try:
             self.p.stdin.close()
@@ -135,10 +140,11 @@ class Conn:
 
 
 class Fuzzer:
-    def __init__(self, conn, model, rng):
+    def __init__(self, conn, model, rng, crash=False):
         self.c = conn
         self.m = model
         self.rng = rng
+        self.crash_enabled = crash
         self.errors = []
 
     def expect(self, sql, expected, note=""):
@@ -228,10 +234,13 @@ class Fuzzer:
         self.expect(create, {}, "create")
 
         next_pk = [0]
+        ops = ["insert", "select", "update", "delete", "txn", "restart"]
+        weights = [26, 34, 10, 8, 16, 6]
+        if self.crash_enabled:
+            ops.append("crash")
+            weights.append(8)
         for step in range(steps):
-            op = rng.choices(
-                ["insert", "select", "update", "delete", "txn", "restart"],
-                weights=[26, 34, 10, 8, 16, 6])[0]
+            op = rng.choices(ops, weights=weights)[0]
             if op == "insert":
                 n = rng.randint(1, 5)
                 rows = []
@@ -333,6 +342,27 @@ class Fuzzer:
                         self.expect("ROLLBACK", {}, "rollback")
                         self.m.rollback()
 
+            elif op == "crash":
+                binary, datadir = self.c.binary, self.c.datadir
+                self.c.crash()
+                if self.m.active:
+                    # uncommitted changes are lost on an abrupt kill
+                    self.m.rollback()
+                # sometimes die again while the next process is recovering
+                recover_kills = self.rng.randint(0, 2)
+                for _ in range(recover_kills):
+                    self.c = Conn(binary, datadir)
+                    self.c.crash()
+                self.c = Conn(binary, datadir)
+                self.c.send("SELECT id, grp, name FROM t ORDER BY id")
+                act = self.c.read()
+                vis = self.m.visible("t")
+                want = [[pk, r[1], r[2]] for pk, r in sorted(vis.items())]
+                if act.get("rows") != want:
+                    self.errors.append(
+                        "post-crash mismatch: engine=%r model=%r"
+                        % (act.get("rows", [])[:6], want[:6]))
+
             else:  # restart
                 binary, datadir = self.c.binary, self.c.datadir
                 self.c.restart()
@@ -352,6 +382,8 @@ def main():
     ap.add_argument("--binary", default=os.path.join(here, "..", "build", "minivectordb"))
     ap.add_argument("--seeds", type=int, default=5)
     ap.add_argument("--steps", type=int, default=120)
+    ap.add_argument("--crash", action="store_true",
+                    help="randomly SIGKILL the process (including during recovery)")
     args = ap.parse_args()
 
     failures = 0
@@ -360,7 +392,7 @@ def main():
         datadir = tempfile.mkdtemp(prefix="mvdb-fuzz-")
         conn = Conn(args.binary, datadir)
         model = Model()
-        fz = Fuzzer(conn, model, rng)
+        fz = Fuzzer(conn, model, rng, crash=args.crash)
         try:
             fz.run(args.steps)
         except (TimeoutError, EOFError) as exc:

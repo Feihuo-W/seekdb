@@ -103,4 +103,5 @@ BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
 python3 minivectordb/tools/run_cases.py            # 运行 mysqltest 公开样例
 python3 minivectordb/tools/run_cases.py --filter vector
 python3 minivectordb/tools/fuzz_diff.py --seeds 10 --steps 200   # 与独立参考模型对拍
+python3 minivectordb/tools/fuzz_diff.py --crash --seeds 10 --steps 200  # 随机强杀（含恢复期）
 ```
