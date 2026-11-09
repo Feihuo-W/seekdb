@@ -46,7 +46,7 @@ class Lexer {
       SkipSpace();
       if (pos_ >= s_.size()) break;
       char c = s_[pos_];
-      if (IsIdentStart(c)) {
+      if (IsIdentStart(c) || c == '`') {
         out.push_back(Ident());
       } else if (std::isdigit(static_cast<unsigned char>(c)) ||
                  ((c == '-' || c == '+') && pos_ + 1 < s_.size() &&
@@ -74,6 +74,28 @@ class Lexer {
   }
 
   Token Ident() {
+    if (!s_.empty() && s_[pos_] == '`') {
+      ++pos_;
+      std::string out;
+      while (pos_ < s_.size()) {
+        char c = s_[pos_];
+        if (c == '`') {
+          if (pos_ + 1 < s_.size() && s_[pos_ + 1] == '`') {
+            out.push_back('`');
+            pos_ += 2;
+            continue;
+          }
+          ++pos_;
+          Token t;
+          t.kind = Token::Ident;
+          t.text = std::move(out);
+          return t;
+        }
+        out.push_back(c);
+        ++pos_;
+      }
+      Fail("syntax_error");
+    }
     size_t b = pos_;
     while (pos_ < s_.size() && IsIdentChar(s_[pos_])) ++pos_;
     Token t;
@@ -341,10 +363,36 @@ class Parser {
 
   Statement ParseCreateTable(Statement st) {
     st.kind = StmtKind::CreateTable;
+    if (PeekKw("if")) {
+      Next();
+      ExpectKw("not");
+      ExpectKw("exists");
+    }
     st.table = ExpectIdent();
     ExpectPunct("(");
     bool have_pk = false;
+    std::string table_pk;
     while (true) {
+      if (PeekKw("primary")) {
+        Next();
+        ExpectKw("key");
+        ExpectPunct("(");
+        table_pk = ExpectIdent();
+        ExpectPunct(")");
+        if (AcceptPunct(",")) continue;
+        break;
+      }
+      if (PeekKw("constraint")) {
+        Next();
+        if (Peek().kind == Token::Ident) Next();
+        ExpectKw("primary");
+        ExpectKw("key");
+        ExpectPunct("(");
+        table_pk = ExpectIdent();
+        ExpectPunct(")");
+        if (AcceptPunct(",")) continue;
+        break;
+      }
       ColumnDef def;
       def.name = ExpectIdent();
       std::string type = Lower(ExpectIdent());
@@ -369,18 +417,46 @@ class Parser {
       } else {
         Fail("unsupported_sql");
       }
-      if (PeekKw("primary")) {
-        Next();
-        ExpectKw("key");
-        if (have_pk) Fail("syntax_error");
-        def.primary = true;
-        have_pk = true;
+      while (true) {
+        if (PeekKw("primary")) {
+          Next();
+          ExpectKw("key");
+          if (have_pk) Fail("syntax_error");
+          def.primary = true;
+          have_pk = true;
+          continue;
+        }
+        if (PeekKw("not")) {
+          Next();
+          ExpectKw("null");
+          continue;
+        }
+        if (PeekKw("null") || PeekKw("unique")) {
+          Next();
+          continue;
+        }
+        break;
       }
       st.columns.push_back(std::move(def));
       if (AcceptPunct(",")) continue;
       break;
     }
     ExpectPunct(")");
+    if (!table_pk.empty()) {
+      if (have_pk) Fail("syntax_error");
+      std::string want;
+      for (char c : table_pk) want.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+      bool found = false;
+      for (auto& def : st.columns) {
+        std::string have;
+        for (char c : def.name) have.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        if (have == want) {
+          def.primary = true;
+          found = true;
+        }
+      }
+      if (!found) Fail("unknown_column");
+    }
     ExpectEnd();
     return st;
   }

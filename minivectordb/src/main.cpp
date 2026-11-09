@@ -71,6 +71,43 @@ void SplitStatements(const std::string& line, std::vector<std::string>* out) {
   if (!stmt.empty()) out->push_back(std::move(stmt));
 }
 
+// Returns 0 when quotes/parens are balanced, 1 when more input is needed,
+// -1 when a closing paren appears without an opener.
+int Balance(const std::string& s) {
+  bool in_str = false;
+  bool in_tick = false;
+  int depth = 0;
+  for (size_t i = 0; i < s.size(); ++i) {
+    char c = s[i];
+    if (in_str) {
+      if (c == '\\' && i + 1 < s.size()) {
+        ++i;
+      } else if (c == '\'') {
+        if (i + 1 < s.size() && s[i + 1] == '\'') {
+          ++i;
+        } else {
+          in_str = false;
+        }
+      }
+      continue;
+    }
+    if (in_tick) {
+      if (c == '`') in_tick = false;
+      continue;
+    }
+    if (c == '\'') {
+      in_str = true;
+    } else if (c == '`') {
+      in_tick = true;
+    } else if (c == '(') {
+      ++depth;
+    } else if (c == ')') {
+      if (--depth < 0) return -1;
+    }
+  }
+  return (in_str || in_tick || depth > 0) ? 1 : 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -101,11 +138,12 @@ int main(int argc, char** argv) {
   std::fflush(stderr);
 
   std::string line;
+  std::string pending;
   bool stop = false;
   while (!stop && std::getline(std::cin, line)) {
     std::string stmt = Trim(line);
     if (stmt.empty()) continue;
-    if (stmt.rfind("--", 0) == 0) {
+    if (pending.empty() && stmt.rfind("--", 0) == 0) {
       std::string rest = Lower(Trim(stmt.substr(2)));
       if (rest == "restart") break;
       if (rest.rfind("mode", 0) == 0) {
@@ -116,13 +154,25 @@ int main(int argc, char** argv) {
       continue;
     }
     std::string low = Lower(stmt);
-    if (low == "quit" || low == "exit") break;
+    if (pending.empty() && (low == "quit" || low == "exit")) break;
+
+    pending += pending.empty() ? stmt : " " + stmt;
+    if (Balance(pending) == 1) continue;
 
     std::vector<std::string> stmts;
-    SplitStatements(stmt, &stmts);
+    SplitStatements(pending, &stmts);
+    pending.clear();
     for (const auto& s : stmts) {
       std::string out = engine.Execute(s);
       std::cout << out << '\n';
+      std::cout.flush();
+    }
+  }
+  if (!pending.empty()) {
+    std::vector<std::string> stmts;
+    SplitStatements(pending, &stmts);
+    for (const auto& s : stmts) {
+      std::cout << engine.Execute(s) << '\n';
       std::cout.flush();
     }
   }
