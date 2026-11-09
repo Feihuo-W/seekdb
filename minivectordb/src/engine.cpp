@@ -34,7 +34,7 @@ enum RecType : uint8_t {
   REC_COMMIT = 5,
 };
 constexpr size_t kRecHeader = 17;  // magic(4) len(4) crc(4) type(1) txn(4)
-constexpr size_t kWalGrowBytes = 64u << 20;
+constexpr size_t kWalGrowBytes = 16u << 20;
 constexpr size_t kCompactWalBytes = 128u << 20;
 constexpr size_t kShutdownCompactBytes = 16u << 20;
 
@@ -234,7 +234,7 @@ bool Engine::OpenWal() {
     return false;
   }
   size_t size = static_cast<size_t>(st.st_size);
-  size_t cap = std::max<size_t>(size + kWalGrowBytes, 1u << 20);
+  size_t cap = std::max<size_t>(size + kWalGrowBytes, kWalGrowBytes);
   if (::ftruncate(fd, static_cast<off_t>(cap)) != 0) {
     ::close(fd);
     init_error_ = "io_error";
@@ -1496,10 +1496,21 @@ bool Engine::Compact() {
     auto it = new_refs.find(tid);
     if (it != new_refs.end()) ts.rows = std::move(it->second);
   }
+  // Reset the WAL to a small empty file so a compacted database does not keep
+  // the peak-sized mapping (and preallocated file) around.
+  if (wal_base_ != nullptr) {
+    ::munmap(wal_base_, wal_cap_);
+    wal_base_ = nullptr;
+    wal_cap_ = 0;
+  }
   if (::ftruncate(wal_fd_, 0) != 0) return false;
-  if (::ftruncate(wal_fd_, static_cast<off_t>(wal_cap_)) != 0) return false;
+  size_t cap = kWalGrowBytes;
+  if (::ftruncate(wal_fd_, static_cast<off_t>(cap)) != 0) return false;
+  void* fresh = ::mmap(nullptr, cap, PROT_READ | PROT_WRITE, MAP_SHARED, wal_fd_, 0);
+  if (fresh == MAP_FAILED) return false;
+  wal_base_ = static_cast<uint8_t*>(fresh);
+  wal_cap_ = cap;
   wal_size_ = 0;
-  if (wal_base_ != nullptr) std::memset(wal_base_, 0, std::min(wal_cap_, size_t(1) << 20));
   dirty_since_compact_ = false;
   return true;
 }

@@ -83,8 +83,8 @@ BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
   CRC/长度不完整的尾部记录即截断逻辑末端，因此恢复途中再次被杀可重复恢复。
   读取阶段不写文件，恢复幂等。
 - 压缩：WAL 超过 128 MiB 或正常关闭且超过 16 MiB 时，把当前可见行重写为
-  `snapshot.tmp`，`fsync` 后原子 `rename`，再截断 WAL；崩溃发生在任一窗口都可由
-  “快照 + 完整 WAL 重放”得到一致状态。
+  `snapshot.tmp`，`fsync` 后原子 `rename`，再截断并收缩 WAL 文件（回到 16 MiB 空白
+  映射）；崩溃发生在任一窗口都可由“快照 + 完整 WAL 重放”得到一致状态。
 - 向量检索：精确扫描 + AVX2/FMA 距离计算；TopK 先用 float32 距离保留 `K + max(3K,64)`
   个候选，再用 double 复核距离、按主键打破并列并截断到 K。`ann` 模式当前同样返回精确
   结果（Recall@K=1.0）。索引创建信息随 schema 持久化，增删改始终作用于当前可见记录。
