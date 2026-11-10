@@ -661,17 +661,23 @@ bool Engine::BindQueryVector(const Column& col, const Literal& lit, std::vector<
   return true;
 }
 
+void Engine::EnsureScan(const TableState& t) const {
+  if (!t.scan_dirty) return;
+  t.scan.clear();
+  t.scan.reserve(t.rows.size());
+  for (const auto& kv : t.rows) t.scan.emplace_back(kv.first, kv.second);
+  t.cache_col = -1;
+  t.cache_str.clear();
+  t.cache_int.clear();
+  t.scan_dirty = false;
+}
+
 template <typename F>
 void Engine::ForEachRow(const TableState& t, F&& fn) const {
   auto oit = overlay_.find(t.schema.id);
   bool has_overlay = oit != overlay_.end() && !oit->second.empty();
   if (!has_overlay) {
-    if (t.scan_dirty) {
-      t.scan.clear();
-      t.scan.reserve(t.rows.size());
-      for (const auto& kv : t.rows) t.scan.emplace_back(kv.first, kv.second);
-      t.scan_dirty = false;
-    }
+    EnsureScan(t);
     for (const auto& kv : t.scan) {
       RowView v = MakeView(kv.second);
       v.s = &t.schema;
@@ -1327,21 +1333,79 @@ std::string Engine::ExecSelect(const Statement& st) {
     const uint32_t vec_off = s.fixed_off[dist_col];
     const float* qptr = query_vec.data();
     const int qdim = static_cast<int>(query_vec.size());
-    ForEachRow(*t, [&](int64_t pk, const RowView& v) {
-      if (k_candidates == 0) return;
-      if (!EvalPredicates(conds, v)) return;
-      double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
-      if (heap.size() < k_candidates) {
-        heap.push(make_res(pk, v, dist));
-      } else {
-        const RowRes& top = heap.top();
-        if (dist < top.dist || (dist == top.dist && pk < top.pk)) {
-          RowRes r = make_res(pk, v, dist);
-          heap.pop();
-          heap.push(std::move(r));
+    auto ovit = overlay_.find(s.id);
+    bool no_overlay = ovit == overlay_.end() || ovit->second.empty();
+    bool cacheable = false;
+    if (no_overlay && conds.size() == 1 && conds[0].op == CmpOp::EQ &&
+        t->rows.size() <= 500000) {
+      const Column& fc = s.cols[conds[0].col];
+      cacheable = (fc.type.kind == ColumnType::BIGINT) ||
+                  (fc.type.kind == ColumnType::VARCHAR && fc.type.param <= 64);
+    }
+    if (cacheable && k_candidates > 0) {
+      EnsureScan(*t);
+      const CondBound& cb = conds[0];
+      bool is_str = s.cols[cb.col].type.kind == ColumnType::VARCHAR;
+      if (t->cache_col != cb.col) {
+        t->cache_col = cb.col;
+        t->cache_str.clear();
+        t->cache_int.clear();
+        size_t n = t->scan.size();
+        if (is_str) {
+          t->cache_str.resize(n);
+          for (size_t i = 0; i < n; ++i) {
+            RowView v = MakeView(t->scan[i].second);
+            v.s = &s;
+            const uint8_t* p = nullptr;
+            uint32_t l = 0;
+            if (ColAt(v, s, cb.col, &p, &l)) t->cache_str[i].assign(reinterpret_cast<const char*>(p), l);
+          }
+        } else {
+          t->cache_int.assign(n, 0);
+          for (size_t i = 0; i < n; ++i) {
+            RowView v = MakeView(t->scan[i].second);
+            v.s = &s;
+            const uint8_t* p = nullptr;
+            uint32_t l = 0;
+            if (ColAt(v, s, cb.col, &p, &l)) t->cache_int[i] = GetI64(p);
+          }
         }
       }
-    });
+      for (size_t i = 0; i < t->scan.size(); ++i) {
+        bool match = is_str ? (t->cache_str[i] == cb.sval) : (t->cache_int[i] == cb.ival);
+        if (!match) continue;
+        int64_t pk = t->scan[i].first;
+        RowView v = MakeView(t->scan[i].second);
+        v.s = &s;
+        if (!v.Valid()) continue;
+        double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
+        if (heap.size() < k_candidates) {
+          heap.push(make_res(pk, v, dist));
+        } else {
+          const RowRes& top = heap.top();
+          if (dist < top.dist || (dist == top.dist && pk < top.pk)) {
+            RowRes r = make_res(pk, v, dist);
+            heap.pop();
+            heap.push(std::move(r));
+          }
+        }
+      }
+    } else if (k_candidates > 0) {
+      ForEachRow(*t, [&](int64_t pk, const RowView& v) {
+        if (!EvalPredicates(conds, v)) return;
+        double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
+        if (heap.size() < k_candidates) {
+          heap.push(make_res(pk, v, dist));
+        } else {
+          const RowRes& top = heap.top();
+          if (dist < top.dist || (dist == top.dist && pk < top.pk)) {
+            RowRes r = make_res(pk, v, dist);
+            heap.pop();
+            heap.push(std::move(r));
+          }
+        }
+      });
+    }
     while (!heap.empty()) {
       results.push_back(heap.top());
       heap.pop();

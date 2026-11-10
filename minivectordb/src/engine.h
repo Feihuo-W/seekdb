@@ -70,6 +70,12 @@ class Engine {
     // mutations so the hot scan path avoids red-black tree pointer chasing.
     mutable std::vector<std::pair<int64_t, RowRef>> scan;
     mutable bool scan_dirty = true;
+    // Lazily built scalar column cache aligned with `scan`, used to evaluate
+    // equality filters without touching row pages. Reset whenever `scan` is
+    // rebuilt; only populated for reasonably sized tables.
+    mutable int cache_col = -1;
+    mutable std::vector<std::string> cache_str;
+    mutable std::vector<int64_t> cache_int;
   };
   struct OverlayRow {
     bool del = false;
@@ -126,6 +132,7 @@ class Engine {
   // iteration
   template <typename F>
   void ForEachRow(const TableState& t, F&& fn) const;
+  void EnsureScan(const TableState& t) const;
 
   // statements
   std::string ExecCreateTable(const Statement& st);
