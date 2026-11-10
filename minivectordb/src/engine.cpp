@@ -667,7 +667,8 @@ void Engine::EnsureScan(const TableState& t) const {
   t.scan.reserve(t.rows.size());
   for (const auto& kv : t.rows) t.scan.emplace_back(kv.first, kv.second);
   t.cache_col = -1;
-  t.cache_str.clear();
+  t.cache_ids.clear();
+  t.cache_dict.clear();
   t.cache_int.clear();
   t.scan_dirty = false;
 }
@@ -1348,17 +1349,28 @@ std::string Engine::ExecSelect(const Statement& st) {
       bool is_str = s.cols[cb.col].type.kind == ColumnType::VARCHAR;
       if (t->cache_col != cb.col) {
         t->cache_col = cb.col;
-        t->cache_str.clear();
+        t->cache_ids.clear();
+        t->cache_dict.clear();
         t->cache_int.clear();
         size_t n = t->scan.size();
         if (is_str) {
-          t->cache_str.resize(n);
+          t->cache_ids.assign(n, 0);
           for (size_t i = 0; i < n; ++i) {
             RowView v = MakeView(t->scan[i].second);
             v.s = &s;
             const uint8_t* p = nullptr;
             uint32_t l = 0;
-            if (ColAt(v, s, cb.col, &p, &l)) t->cache_str[i].assign(reinterpret_cast<const char*>(p), l);
+            if (!ColAt(v, s, cb.col, &p, &l)) continue;
+            std::string key(reinterpret_cast<const char*>(p), l);
+            auto it = t->cache_dict.find(key);
+            uint32_t id;
+            if (it == t->cache_dict.end()) {
+              id = static_cast<uint32_t>(t->cache_dict.size());
+              t->cache_dict.emplace(std::move(key), id);
+            } else {
+              id = it->second;
+            }
+            t->cache_ids[i] = id;
           }
         } else {
           t->cache_int.assign(n, 0);
@@ -1371,22 +1383,31 @@ std::string Engine::ExecSelect(const Statement& st) {
           }
         }
       }
-      for (size_t i = 0; i < t->scan.size(); ++i) {
-        bool match = is_str ? (t->cache_str[i] == cb.sval) : (t->cache_int[i] == cb.ival);
-        if (!match) continue;
-        int64_t pk = t->scan[i].first;
-        RowView v = MakeView(t->scan[i].second);
-        v.s = &s;
-        if (!v.Valid()) continue;
-        double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
-        if (heap.size() < k_candidates) {
-          heap.push(make_res(pk, v, dist));
-        } else {
-          const RowRes& top = heap.top();
-          if (dist < top.dist || (dist == top.dist && pk < top.pk)) {
-            RowRes r = make_res(pk, v, dist);
-            heap.pop();
-            heap.push(std::move(r));
+      uint32_t want_id = 0;
+      bool want_found = true;
+      if (is_str) {
+        auto it = t->cache_dict.find(cb.sval);
+        want_found = it != t->cache_dict.end();
+        if (want_found) want_id = it->second;
+      }
+      if (!is_str || want_found) {
+        for (size_t i = 0; i < t->scan.size(); ++i) {
+          bool match = is_str ? (t->cache_ids[i] == want_id) : (t->cache_int[i] == cb.ival);
+          if (!match) continue;
+          int64_t pk = t->scan[i].first;
+          RowView v = MakeView(t->scan[i].second);
+          v.s = &s;
+          if (!v.Valid()) continue;
+          double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
+          if (heap.size() < k_candidates) {
+            heap.push(make_res(pk, v, dist));
+          } else {
+            const RowRes& top = heap.top();
+            if (dist < top.dist || (dist == top.dist && pk < top.pk)) {
+              RowRes r = make_res(pk, v, dist);
+              heap.pop();
+              heap.push(std::move(r));
+            }
           }
         }
       }

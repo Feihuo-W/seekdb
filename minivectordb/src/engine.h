@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "sql.h"
@@ -71,10 +72,12 @@ class Engine {
     mutable std::vector<std::pair<int64_t, RowRef>> scan;
     mutable bool scan_dirty = true;
     // Lazily built scalar column cache aligned with `scan`, used to evaluate
-    // equality filters without touching row pages. Reset whenever `scan` is
-    // rebuilt; only populated for reasonably sized tables.
+    // equality filters without touching row pages. VARCHAR values are interned
+    // to uint32 ids so the per-query filter loop compares integers. Reset
+    // whenever `scan` is rebuilt; only populated for reasonably sized tables.
     mutable int cache_col = -1;
-    mutable std::vector<std::string> cache_str;
+    mutable std::vector<uint32_t> cache_ids;
+    mutable std::unordered_map<std::string, uint32_t> cache_dict;
     mutable std::vector<int64_t> cache_int;
   };
   struct OverlayRow {
