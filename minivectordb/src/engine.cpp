@@ -945,7 +945,9 @@ std::string LowerName(std::string s) {
 
 std::string Engine::ExecCreateTable(const Statement& st) {
   std::string tname = LowerName(st.table);
-  if (table_ids_.count(tname)) return JsonError("table_exists");
+  if (table_ids_.count(tname)) {
+    return st.if_not_exists ? JsonOk() : JsonError("table_exists");
+  }
   if (st.columns.empty()) return JsonError("syntax_error");
   Schema s;
   s.name = tname;
@@ -1132,12 +1134,39 @@ std::string Engine::ExecSelect(const Statement& st) {
     int item = -1;
     int col = -1;
     bool desc = false;
+    bool dist_expr = false;  // ORDER BY L2_DISTANCE(...) that is not a select item
+    int dcol = -1;
+    std::vector<float> dqvec;
   };
   std::vector<OrderBound> orders;
   for (const auto& oi : st.order) {
-    std::string lname = LowerName(oi.name);
     OrderBound ob;
     ob.desc = oi.desc;
+    if (oi.is_distance) {
+      int idx = s.FindCol(LowerName(oi.col));
+      if (idx < 0) return JsonError("unknown_column");
+      if (s.cols[idx].type.kind != ColumnType::VECTOR) return JsonError("unsupported_sql");
+      std::string err;
+      std::vector<float> q;
+      if (!BindQueryVector(s.cols[idx], oi.qvec, &q, err)) return JsonError(err);
+      int match = -1;
+      for (size_t j = 0; j < items.size(); ++j) {
+        if (items[j].kind == 2 && items[j].col == idx && items[j].qvec == q) {
+          match = static_cast<int>(j);
+          break;
+        }
+      }
+      if (match >= 0) {
+        ob.item = match;
+      } else {
+        ob.dist_expr = true;
+        ob.dcol = idx;
+        ob.dqvec = std::move(q);
+      }
+      orders.push_back(std::move(ob));
+      continue;
+    }
+    std::string lname = LowerName(oi.name);
     auto it = name_map.find(lname);
     if (it != name_map.end()) {
       ob.item = it->second;
@@ -1146,7 +1175,7 @@ std::string Engine::ExecSelect(const Statement& st) {
       if (idx < 0) return JsonError("unknown_column");
       ob.col = idx;
     }
-    orders.push_back(ob);
+    orders.push_back(std::move(ob));
   }
 
   bool need_dist = false;
@@ -1189,6 +1218,24 @@ std::string Engine::ExecSelect(const Statement& st) {
 
   auto key_of_order = [&](const OrderBound& ob, const RowView& v, double dist) -> KeyVal {
     KeyVal k;
+    if (ob.dist_expr) {
+      const uint8_t* p = nullptr;
+      uint32_t len = 0;
+      if (!ColAt(v, s, ob.dcol, &p, &len)) {
+        k.kind = 2;
+        k.d = 0;
+        return k;
+      }
+      const float* a = reinterpret_cast<const float*>(p);
+      double sum = 0.0;
+      for (size_t i = 0; i < ob.dqvec.size(); ++i) {
+        double d = static_cast<double>(a[i]) - static_cast<double>(ob.dqvec[i]);
+        sum += d * d;
+      }
+      k.kind = 2;
+      k.d = sum;
+      return k;
+    }
     if (ob.item >= 0) {
       const Item& it = items[ob.item];
       if (it.kind == 2) {

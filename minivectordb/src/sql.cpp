@@ -367,6 +367,7 @@ class Parser {
       Next();
       ExpectKw("not");
       ExpectKw("exists");
+      st.if_not_exists = true;
     }
     st.table = ExpectIdent();
     ExpectPunct("(");
@@ -531,7 +532,17 @@ class Parser {
       ExpectKw("by");
       while (true) {
         OrderItem oi;
-        oi.name = ExpectIdent();
+        std::string nm = ExpectIdent();
+        if (AcceptPunct("(")) {
+          if (Lower(nm) != "l2_distance") Fail("unsupported_sql");
+          oi.is_distance = true;
+          oi.col = ExpectIdent();
+          ExpectPunct(",");
+          oi.qvec = ParseLiteral();
+          ExpectPunct(")");
+        } else {
+          oi.name = nm;
+        }
         if (PeekKw("asc")) { Next(); }
         else if (PeekKw("desc")) { Next(); oi.desc = true; }
         st.order.push_back(std::move(oi));

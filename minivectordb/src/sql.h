@@ -56,8 +56,11 @@ struct SelectItem {
 };
 
 struct OrderItem {
-  std::string name;
+  std::string name;   // column name or select alias
   bool desc = false;
+  bool is_distance = false;  // ORDER BY L2_DISTANCE(col, <vector>)
+  std::string col;
+  Literal qvec;
 };
 
 struct Statement {
@@ -65,6 +68,7 @@ struct Statement {
   std::string error;  // non-empty when the statement is rejected
 
   std::string table;
+  bool if_not_exists = false;
   std::vector<ColumnDef> columns;
 
   std::string index_name;
