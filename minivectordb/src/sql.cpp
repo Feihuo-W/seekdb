@@ -515,6 +515,12 @@ class Parser {
         if (PeekKw("as")) {
           Next();
           item.alias = ExpectIdent();
+        } else if (Peek().kind == Token::Ident) {
+          std::string next = Lower(Peek().text);
+          if (next != "from" && next != "where" && next != "order" && next != "limit" &&
+              next != "and" && next != "asc" && next != "desc") {
+            item.alias = Next().text;
+          }
         }
       }
       st.select_items.push_back(std::move(item));
@@ -594,21 +600,28 @@ class Parser {
     return st;
   }
 
-  void ParseWhere(std::vector<Condition>& out) {
+  void ParseWhere(std::vector<Condition>& out) { ParseWhereGroup(out); }
+
+  void ParseWhereGroup(std::vector<Condition>& out) {
     while (true) {
-      Condition c;
-      c.col = ExpectIdent();
-      const Token& t = Peek();
-      if (t.kind != Token::Punct) Fail("syntax_error");
-      if (t.text == "=") c.op = CmpOp::EQ;
-      else if (t.text == "<") c.op = CmpOp::LT;
-      else if (t.text == "<=") c.op = CmpOp::LE;
-      else if (t.text == ">") c.op = CmpOp::GT;
-      else if (t.text == ">=") c.op = CmpOp::GE;
-      else Fail("syntax_error");
-      Next();
-      c.lit = ParseLiteral();
-      out.push_back(std::move(c));
+      if (AcceptPunct("(")) {
+        ParseWhereGroup(out);
+        ExpectPunct(")");
+      } else {
+        Condition c;
+        c.col = ExpectIdent();
+        const Token& t = Peek();
+        if (t.kind != Token::Punct) Fail("syntax_error");
+        if (t.text == "=") c.op = CmpOp::EQ;
+        else if (t.text == "<") c.op = CmpOp::LT;
+        else if (t.text == "<=") c.op = CmpOp::LE;
+        else if (t.text == ">") c.op = CmpOp::GT;
+        else if (t.text == ">=") c.op = CmpOp::GE;
+        else Fail("syntax_error");
+        Next();
+        c.lit = ParseLiteral();
+        out.push_back(std::move(c));
+      }
       if (PeekKw("and")) { Next(); continue; }
       break;
     }

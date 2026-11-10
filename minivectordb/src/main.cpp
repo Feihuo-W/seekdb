@@ -190,6 +190,7 @@ int main(int argc, char** argv) {
     }
     std::string stmt = Trim(line);
     if (stmt.empty()) continue;
+    if (pending.empty() && stmt[0] == '#') continue;
     if (pending.empty() && stmt.rfind("--", 0) == 0) {
       std::string rest = Lower(Trim(stmt.substr(2)));
       while (!rest.empty() && rest.back() == ';') rest = Trim(rest.substr(0, rest.size() - 1));

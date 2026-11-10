@@ -609,10 +609,6 @@ bool Engine::BindLiteral(const Column& col, const Literal& lit, ColumnValue* out
         err = "type_mismatch";
         return false;
       }
-      if (Utf8CodePoints(lit.s) > col.type.param) {
-        err = "value_too_long";
-        return false;
-      }
       out->s = lit.s;
       return true;
     case ColumnType::VECTOR: {
@@ -1050,6 +1046,9 @@ std::string Engine::ExecInsert(const Statement& st) {
       std::string err;
       if (!BindLiteral(s.cols[targets[i]], row[i], &vals[targets[i]], err))
         return JsonError(err);
+      if (s.cols[targets[i]].type.kind == ColumnType::VARCHAR &&
+          Utf8CodePoints(vals[targets[i]].s) > s.cols[targets[i]].type.param)
+        return JsonError("value_too_long");
       present[targets[i]] = true;
     }
     for (size_t c = 0; c < s.cols.size(); ++c) {
@@ -1541,6 +1540,9 @@ std::string Engine::ExecUpdate(const Statement& st) {
     sb.col = idx;
     std::string err;
     if (!BindLiteral(s.cols[idx], lit, &sb.val, err)) return JsonError(err);
+    if (s.cols[idx].type.kind == ColumnType::VARCHAR &&
+        Utf8CodePoints(sb.val.s) > s.cols[idx].type.param)
+      return JsonError("value_too_long");
     sets.push_back(std::move(sb));
   }
   std::vector<CondBound> conds;
