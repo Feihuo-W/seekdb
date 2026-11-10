@@ -1,5 +1,7 @@
 #include <unistd.h>
 
+#include <algorithm>
+
 #include <cctype>
 #include <csignal>
 #include <cstdio>
@@ -108,6 +110,30 @@ int Balance(const std::string& s) {
   return (quote != 0 || in_tick || depth > 0) ? 1 : 0;
 }
 
+// Escapes a statement for single-line stderr diagnostics.
+std::string LogEscape(const std::string& s, size_t limit = 400) {
+  std::string out;
+  out.reserve(std::min(s.size(), limit) + 8);
+  for (size_t i = 0; i < s.size() && out.size() < limit; ++i) {
+    unsigned char c = static_cast<unsigned char>(s[i]);
+    switch (c) {
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (c < 0x20 || c == 0x7f) {
+          char buf[8];
+          std::snprintf(buf, sizeof(buf), "\\x%02x", c);
+          out += buf;
+        } else {
+          out.push_back(static_cast<char>(c));
+        }
+    }
+  }
+  if (s.size() > limit) out += "...";
+  return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -137,6 +163,18 @@ int main(int argc, char** argv) {
   std::fprintf(stderr, "minivectordb: ready (%s)\n", dir.c_str());
   std::fflush(stderr);
 
+  const bool trace_all = std::getenv("MVDB_TRACE") != nullptr;
+  auto run_stmt = [&](const std::string& s) {
+    std::string out = engine.Execute(s);
+    if (trace_all || out.rfind("{\"error\"", 0) == 0) {
+      std::fprintf(stderr, "stmt input=<%s> resp=<%s>\n", LogEscape(s).c_str(),
+                   LogEscape(out, 200).c_str());
+      std::fflush(stderr);
+    }
+    std::cout << out << '\n';
+    std::cout.flush();
+  };
+
   std::string line;
   std::string pending;
   bool stop = false;
@@ -155,11 +193,17 @@ int main(int argc, char** argv) {
     if (pending.empty() && stmt.rfind("--", 0) == 0) {
       std::string rest = Lower(Trim(stmt.substr(2)));
       while (!rest.empty() && rest.back() == ';') rest = Trim(rest.substr(0, rest.size() - 1));
-      if (rest == "restart") break;
+      if (rest == "restart") {
+        std::fprintf(stderr, "directive restart\n");
+        std::fflush(stderr);
+        break;
+      }
       if (rest.rfind("mode", 0) == 0) {
         std::string mode = Trim(rest.substr(4));
         if (!mode.empty() && mode[0] == '=') mode = Trim(mode.substr(1));
         engine.SetAnnMode(mode == "ann");
+        std::fprintf(stderr, "directive mode %s\n", mode.c_str());
+        std::fflush(stderr);
         continue;
       }
       continue;
@@ -173,19 +217,12 @@ int main(int argc, char** argv) {
     std::vector<std::string> stmts;
     SplitStatements(pending, &stmts);
     pending.clear();
-    for (const auto& s : stmts) {
-      std::string out = engine.Execute(s);
-      std::cout << out << '\n';
-      std::cout.flush();
-    }
+    for (const auto& s : stmts) run_stmt(s);
   }
   if (!pending.empty()) {
     std::vector<std::string> stmts;
     SplitStatements(pending, &stmts);
-    for (const auto& s : stmts) {
-      std::cout << engine.Execute(s) << '\n';
-      std::cout.flush();
-    }
+    for (const auto& s : stmts) run_stmt(s);
   }
 
   engine.Shutdown();
