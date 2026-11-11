@@ -108,4 +108,5 @@ python3 minivectordb/tools/scenario_checks.py    # 多表事务/原子性/引号
 python3 minivectordb/tools/scenario_checks.py --scale-rows 500000 --scale-dim 64  # 压缩与恢复
 python3 minivectordb/tools/spec_suite.py   # 按题面逐条自测（229 项：类型/语义/事务/恢复/协议/对抗）
 python3 minivectordb/tools/stress_recovery.py  # 压缩窗口强杀、恢复期连杀、提交后强杀压力
+python3 minivectordb/tools/hostile_driver.py # 恶意输入：每行输入必须回一条 JSON，不得挂死
 ```

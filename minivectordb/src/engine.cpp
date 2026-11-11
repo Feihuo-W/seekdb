@@ -20,6 +20,7 @@
 #include <immintrin.h>
 #endif
 
+#include "fastfloat.h"
 #include "json.h"
 
 namespace vdb {
@@ -109,11 +110,16 @@ bool ParseVecText(const std::string& text, std::vector<double>* out) {
       ++i;
       break;
     }
-    char* endp = nullptr;
     const char* start = text.c_str() + i;
-    double v = std::strtod(start, &endp);
-    if (endp == start) return false;
-    i = static_cast<size_t>(endp - text.c_str());
+    const char* next = nullptr;
+    double v = 0;
+    if (!FastParseDouble(start, text.c_str() + text.size(), &v, &next)) {
+      char* endp = nullptr;
+      v = std::strtod(start, &endp);
+      if (endp == start) return false;
+      next = endp;
+    }
+    i = static_cast<size_t>(next - text.c_str());
     out->push_back(v);
     skip();
     if (i < text.size() && text[i] == ',') {

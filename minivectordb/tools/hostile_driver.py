@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+"""Hostile-input driver check: every input line must yield exactly one JSON
+response (or none, for comment/directive lines) without hanging.
+
+This mirrors the platform failure mode "JSON response timeout: no JSON response
+received in time (check newlines, flush and process blocking)".
+"""
+
+import json
+import os
+import select
+import subprocess
+import sys
+import tempfile
+import time
+
+
+class Db:
+    def __init__(self, binary, datadir):
+        self.p = subprocess.Popen([binary, "--data", datadir], stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.buf = b""
+
+    def send(self, line):
+        self.p.stdin.write(line.encode("utf-8") + b"\n")
+        self.p.stdin.flush()
+
+    def read(self, timeout):
+        fd = self.p.stdout.fileno()
+        deadline = time.time() + timeout
+        while b"\n" not in self.buf:
+            remain = deadline - time.time()
+            if remain <= 0:
+                return None
+            r, _, _ = select.select([fd], [], [], remain)
+            if not r:
+                return None
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                return None
+            self.buf += chunk
+        line, self.buf = self.buf.split(b"\n", 1)
+        return json.loads(line.decode("utf-8"))
+
+
+def main():
+    here = os.path.dirname(os.path.abspath(__file__))
+    binary = sys.argv[1] if len(sys.argv) > 1 else os.path.join(here, "..", "build", "minivectordb")
+    datadir = tempfile.mkdtemp(prefix="mvdb-hostile-")
+    db = Db(binary, datadir)
+    fails = []
+
+    def expect_response(label, line, timeout=2.0):
+        db.send(line)
+        r = db.read(timeout)
+        if r is None:
+            fails.append("%s: no JSON response within %.1fs for %r" % (label, timeout, line[:80]))
+            print("FAIL", label, "-> no response")
+        else:
+            print("ok  ", label, "->", json.dumps(r)[:90])
+
+    def expect_no_response(label, line, timeout=0.6):
+        db.send(line)
+        r = db.read(timeout)
+        if r is not None:
+            fails.append("%s: unexpected response %r for %r" % (label, r, line))
+            print("FAIL", label, "-> unexpected response")
+
+    db.send("CREATE TABLE t (id BIGINT PRIMARY KEY, grp BIGINT, s VARCHAR(16), v VECTOR(2))")
+    db.read(5)
+    db.send("INSERT INTO t VALUES (1,1,'a','[0,0]')")
+    db.read(5)
+
+    expect_response("unterminated quote", "SELECT id FROM t WHERE s = 'unterminated")
+    expect_response("unterminated paren", "SELECT (id FROM t")
+    expect_response("extra close paren", "SELECT id FROM t WHERE id = 1)")
+    expect_response("line comment with apostrophe", "SELECT id FROM t WHERE id = 1 -- don't")
+    expect_response("block comment with apostrophe", "SELECT id FROM t /* don't */ WHERE id = 1")
+    expect_response("trailing AND", "SELECT id FROM t WHERE id = 1 AND")
+    expect_response("incomplete ORDER BY", "SELECT id FROM t ORDER BY")
+    expect_response("syntax error", "SELEC id FROM t")
+    expect_response("unsupported group by", "SELECT id FROM t GROUP BY id")
+    expect_response("semicolon inside string", "SELECT id FROM t WHERE s = 'a;b'")
+    expect_response("semicolon terminated", "SELECT id FROM t;")
+    expect_response("duplicate key", "INSERT INTO t VALUES (1,1,'a','[0,0]')")
+    expect_response("huge statement", "INSERT INTO t VALUES (999,9,'" +
+                    ",".join(["0.5"] * 400) + "')")
+    expect_response("still alive", "SELECT id FROM t WHERE id = 1")
+    expect_no_response("hash comment", "# just a comment")
+    expect_no_response("dash comment", "-- just a comment")
+    expect_response("alive after comments", "SELECT id FROM t WHERE id = 1")
+
+    # A driver that waits for an answer to a directive must receive one.
+    db.send("--mode ann")
+    r = db.read(3.0)
+    if r is None:
+        fails.append("directive wait: no answer to '--mode ann' within 3s")
+        print("FAIL directive wait -> no answer")
+    else:
+        print("ok   directive wait ->", json.dumps(r)[:60])
+
+    # A driver that pipelines a directive must not receive a stray answer.
+    db.send("--mode ann")
+    db.send("SELECT id FROM t WHERE id = 1")
+    r = db.read(2.0)
+    if r is None or r.get("rows") != [[1]]:
+        fails.append("directive pipeline: expected the query answer, got %r" % (r,))
+        print("FAIL directive pipeline ->", r)
+    else:
+        print("ok   directive pipeline ->", json.dumps(r)[:60])
+    stray = db.read(0.6)
+    if stray is not None:
+        fails.append("directive pipeline: stray extra answer %r" % (stray,))
+        print("FAIL directive pipeline -> stray", stray)
+    else:
+        print("ok   directive pipeline -> no stray answer")
+
+    print("\n%d failures" % len(fails))
+    for f in fails:
+        print("FAIL " + f)
+    return 1 if fails else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

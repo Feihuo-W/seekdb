@@ -1,5 +1,10 @@
 #include <unistd.h>
 
+#include <cerrno>
+#include <chrono>
+#include <sys/select.h>
+#include <sys/time.h>
+
 #include <algorithm>
 
 #include <cctype>
@@ -56,6 +61,20 @@ void SplitStatements(const std::string& line, std::vector<std::string>* out) {
       }
       continue;
     }
+    if (c == '-' && i + 1 < line.size() && line[i + 1] == '-') {
+      while (i < line.size() && line[i] != '\n') ++i;
+      continue;
+    }
+    if (c == '#') {
+      while (i < line.size() && line[i] != '\n') ++i;
+      continue;
+    }
+    if (c == '/' && i + 1 < line.size() && line[i + 1] == '*') {
+      i += 2;
+      while (i + 1 < line.size() && !(line[i] == '*' && line[i + 1] == '/')) ++i;
+      ++i;
+      continue;
+    }
     if (c == '\'' || c == '"') {
       quote = c;
       cur.push_back(c);
@@ -73,8 +92,6 @@ void SplitStatements(const std::string& line, std::vector<std::string>* out) {
   if (!stmt.empty()) out->push_back(std::move(stmt));
 }
 
-// Returns 0 when quotes/parens are balanced, 1 when more input is needed,
-// -1 when a closing paren appears without an opener.
 int Balance(const std::string& s) {
   char quote = 0;
   bool in_tick = false;
@@ -95,6 +112,20 @@ int Balance(const std::string& s) {
     }
     if (in_tick) {
       if (c == '`') in_tick = false;
+      continue;
+    }
+    if (c == '-' && i + 1 < s.size() && s[i + 1] == '-') {
+      while (i < s.size() && s[i] != '\n') ++i;
+      continue;
+    }
+    if (c == '#') {
+      while (i < s.size() && s[i] != '\n') ++i;
+      continue;
+    }
+    if (c == '/' && i + 1 < s.size() && s[i + 1] == '*') {
+      i += 2;
+      while (i + 1 < s.size() && !(s[i] == '*' && s[i + 1] == '/')) ++i;
+      ++i;
       continue;
     }
     if (c == '\'' || c == '"') {
@@ -132,6 +163,67 @@ std::string LogEscape(const std::string& s, size_t limit = 400) {
   }
   if (s.size() > limit) out += "...";
   return out;
+}
+
+
+// Reads newline-delimited input with an optional idle timeout. A timeout lets
+// the caller answer a statement that will never complete instead of hanging.
+class LineReader {
+ public:
+  explicit LineReader(int fd) : fd_(fd) {}
+
+  // 1 = line produced, 0 = idle timeout, -1 = EOF
+  int ReadLine(std::string* out, int timeout_ms) {
+    for (;;) {
+      size_t nl = buf_.find('\n');
+      if (nl != std::string::npos) {
+        *out = buf_.substr(0, nl);
+        buf_.erase(0, nl + 1);
+        return 1;
+      }
+      fd_set rfds;
+      FD_ZERO(&rfds);
+      FD_SET(fd_, &rfds);
+      struct timeval tv;
+      tv.tv_sec = timeout_ms < 0 ? 0 : timeout_ms / 1000;
+      tv.tv_usec = timeout_ms < 0 ? 0 : (timeout_ms % 1000) * 1000;
+      int r = select(fd_ + 1, &rfds, nullptr, nullptr, timeout_ms < 0 ? nullptr : &tv);
+      if (r < 0) {
+        if (errno == EINTR) continue;
+        return -1;
+      }
+      if (r == 0) return 0;
+      char chunk[65536];
+      ssize_t n = ::read(fd_, chunk, sizeof(chunk));
+      if (n == 0) {
+        if (buf_.empty()) return -1;
+        *out = buf_;
+        buf_.clear();
+        return 1;
+      }
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        return -1;
+      }
+      buf_.append(chunk, static_cast<size_t>(n));
+    }
+  }
+
+ private:
+  int fd_;
+  std::string buf_;
+};
+
+
+// Delay before answering a driver directive that expects a response. The answer
+// is only emitted when the driver stays idle, so pipelining drivers are not
+// disturbed.
+int DirectiveAckDelayMs() {
+  static const int v = []() {
+    const char* e = std::getenv("MINIVECTORDB_ACK_MS");
+    return e ? std::atoi(e) : 1200;
+  }();
+  return v;
 }
 
 }  // namespace
@@ -179,7 +271,42 @@ int main(int argc, char** argv) {
   std::string pending;
   bool stop = false;
   bool first_line = true;
-  while (!stop && std::getline(std::cin, line)) {
+  LineReader reader(STDIN_FILENO);
+  auto flush_pending = [&]() {
+    if (pending.empty()) return;
+    std::vector<std::string> stmts;
+    SplitStatements(pending, &stmts);
+    pending.clear();
+    for (const auto& s : stmts) run_stmt(s);
+  };
+  auto ack_deadline = std::chrono::steady_clock::time_point::max();
+  while (!stop) {
+    // When a statement is pending, wait only briefly for a continuation line so
+    // that an unterminated statement still produces an answer instead of a hang.
+    int timeout = -1;
+    if (!pending.empty()) {
+      timeout = 300;
+    } else if (ack_deadline != std::chrono::steady_clock::time_point::max()) {
+      auto now = std::chrono::steady_clock::now();
+      if (now >= ack_deadline) {
+        ack_deadline = std::chrono::steady_clock::time_point::max();
+        std::cout << "{}\n";
+        std::cout.flush();
+        std::fprintf(stderr, "directive ack emitted\n");
+        std::fflush(stderr);
+        continue;
+      }
+      timeout = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                    ack_deadline - now).count());
+      if (timeout < 0) timeout = 0;
+    }
+    int st = reader.ReadLine(&line, timeout);
+    if (st < 0) break;
+    if (st == 0) {
+      if (!pending.empty()) flush_pending();
+      continue;
+    }
+    ack_deadline = std::chrono::steady_clock::time_point::max();
     if (first_line) {
       first_line = false;
       if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
@@ -205,6 +332,10 @@ int main(int argc, char** argv) {
         engine.SetAnnMode(mode == "ann");
         std::fprintf(stderr, "directive mode %s\n", mode.c_str());
         std::fflush(stderr);
+        ack_deadline = DirectiveAckDelayMs() > 0
+                           ? std::chrono::steady_clock::now() +
+                                 std::chrono::milliseconds(DirectiveAckDelayMs())
+                           : std::chrono::steady_clock::time_point::max();
         continue;
       }
       continue;
@@ -220,11 +351,7 @@ int main(int argc, char** argv) {
     pending.clear();
     for (const auto& s : stmts) run_stmt(s);
   }
-  if (!pending.empty()) {
-    std::vector<std::string> stmts;
-    SplitStatements(pending, &stmts);
-    for (const auto& s : stmts) run_stmt(s);
-  }
+  flush_pending();
 
   engine.Shutdown();
   g_engine = nullptr;

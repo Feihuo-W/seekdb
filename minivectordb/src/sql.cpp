@@ -1,5 +1,7 @@
 #include "sql.h"
 
+#include "fastfloat.h"
+
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -46,6 +48,20 @@ class Lexer {
       SkipSpace();
       if (pos_ >= s_.size()) break;
       char c = s_[pos_];
+      if (c == '-' && pos_ + 1 < s_.size() && s_[pos_ + 1] == '-') {
+        while (pos_ < s_.size() && s_[pos_] != '\n') ++pos_;
+        continue;
+      }
+      if (c == '#') {
+        while (pos_ < s_.size() && s_[pos_] != '\n') ++pos_;
+        continue;
+      }
+      if (c == '/' && pos_ + 1 < s_.size() && s_[pos_ + 1] == '*') {
+        pos_ += 2;
+        while (pos_ + 1 < s_.size() && !(s_[pos_] == '*' && s_[pos_ + 1] == '/')) ++pos_;
+        pos_ = (pos_ + 1 < s_.size()) ? pos_ + 2 : pos_;
+        continue;
+      }
       if (IsIdentStart(c) || c == '`') {
         out.push_back(Ident());
       } else if (std::isdigit(static_cast<unsigned char>(c)) ||
@@ -139,7 +155,10 @@ class Lexer {
       t.num = static_cast<double>(v);
     } else {
       t.is_int = false;
-      t.num = std::strtod(text.c_str(), nullptr);
+      const char* next = nullptr;
+      if (!FastParseDouble(text.c_str(), text.c_str() + text.size(), &t.num, &next)) {
+        t.num = std::strtod(text.c_str(), nullptr);
+      }
     }
     return t;
   }
@@ -233,7 +252,12 @@ class Lexer {
         }
       }
       std::string text = s_.substr(b, pos_ - b);
-      nums.push_back(std::strtod(text.c_str(), nullptr));
+      double v = 0;
+      const char* next = nullptr;
+      if (!FastParseDouble(text.c_str(), text.c_str() + text.size(), &v, &next)) {
+        v = std::strtod(text.c_str(), nullptr);
+      }
+      nums.push_back(v);
       SkipSpace();
       if (pos_ < s_.size() && s_[pos_] == ',') { ++pos_; continue; }
       break;
