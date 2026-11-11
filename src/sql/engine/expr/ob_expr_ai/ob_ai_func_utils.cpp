@@ -1674,7 +1674,6 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
     // render every argument to its substitution text: string args are used
     // as-is, any other JSON argument is serialized to its JSON text
     ObArray<ObString> rendered_args;
-    int64_t max_result_len = template_str.length();
     for (uint64_t i = 0; OB_SUCC(ret) && i < args_count; i++) {
       ObJsonNode *arg_node = args_array->get_value(i);
       if (OB_ISNULL(arg_node)) {
@@ -1682,26 +1681,62 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
       } else if (arg_node->json_type() == ObJsonNodeType::J_STRING) {
         ObString arg_value = static_cast<ObJsonString *>(arg_node)->get_str();
         if (OB_FAIL(rendered_args.push_back(arg_value))) {
-        } else {
-          max_result_len += arg_value.length();
         }
       } else {
         ObString rendered;
         if (OB_FAIL(ObAIFuncJsonUtils::print_json_to_str(allocator, arg_node, rendered))) {
         } else if (OB_FAIL(rendered_args.push_back(rendered))) {
-        } else {
-          max_result_len += rendered.length();
         }
+      }
+    }
+    // First pass: compute the exact output size. The same placeholder may occur
+    // more than once, so every occurrence contributes its rendered argument again.
+    const char *template_ptr = template_str.ptr();
+    int64_t template_len = template_str.length();
+    int64_t needed_len = 0;
+    for (int64_t i = 0; OB_SUCC(ret) && i < template_len; i++) {
+      if ('{' == template_ptr[i]) {
+        int64_t start_pos = i;
+        int64_t end_pos = start_pos;
+        bool found_end = false;
+        for (int64_t j = start_pos + 1; j < template_len && !found_end; j++) {
+          if ('}' == template_ptr[j]) {
+            end_pos = j;
+            found_end = true;
+          } else if (template_ptr[j] < '0' || template_ptr[j] > '9') {
+            break;
+          }
+        }
+        if (found_end && end_pos > start_pos + 1) {
+          int64_t index = 0;
+          bool valid_index = true;
+          for (int64_t k = start_pos + 1; k < end_pos && valid_index; k++) {
+            if (template_ptr[k] >= '0' && template_ptr[k] <= '9') {
+              index = index * 10 + (template_ptr[k] - '0');
+            } else {
+              valid_index = false;
+            }
+          }
+          if (valid_index && static_cast<uint64_t>(index) < args_count) {
+            needed_len += rendered_args.at(index).length();
+            i = end_pos;
+          } else {
+            ret = OB_INVALID_ARGUMENT;
+            LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt: invalid placeholder index");
+          }
+        } else {
+          ++needed_len;
+        }
+      } else {
+        ++needed_len;
       }
     }
     char *result_buf = NULL;
     if (OB_FAIL(ret)) {
-    } else if (OB_ISNULL(result_buf = static_cast<char *>(allocator.alloc(max_result_len)))) {
+    } else if (OB_ISNULL(result_buf = static_cast<char *>(allocator.alloc(needed_len + 1)))) {
       ret = OB_ALLOCATE_MEMORY_FAILED;
     } else {
       int64_t result_pos = 0;
-      const char *template_ptr = template_str.ptr();
-      int64_t template_len = template_str.length();
       
       for (int64_t i = 0; i < template_len && OB_SUCC(ret); i++) {
         if (template_ptr[i] == '{') {
@@ -1735,7 +1770,7 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
             if (valid_index && index >= 0 && static_cast<uint64_t>(index) < args_count) {
               ObString arg_value = rendered_args.at(static_cast<int64_t>(index));
 
-              if (result_pos + arg_value.length() <= max_result_len) {
+              if (result_pos + arg_value.length() <= needed_len) {
                 MEMCPY(result_buf + result_pos, arg_value.ptr(), arg_value.length());
                 result_pos += arg_value.length();
               } else {
@@ -1748,14 +1783,14 @@ int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &al
               LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt: invalid placeholder index");
             }
           } else {
-            if (result_pos < max_result_len) {
+            if (result_pos < needed_len) {
               result_buf[result_pos++] = template_ptr[i];
             } else {
               ret = OB_BUF_NOT_ENOUGH;
             }
           }
         } else {
-          if (result_pos < max_result_len) {
+          if (result_pos < needed_len) {
             result_buf[result_pos++] = template_ptr[i];
           } else {
             ret = OB_BUF_NOT_ENOUGH;
