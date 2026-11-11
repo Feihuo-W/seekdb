@@ -36,7 +36,7 @@
 | v8 | `ecfd4e999` | 11-10 11:05 | 快速浮点解析（≤15 位有效数字走精确快路径，其余回落 strtod） | 单条 2 万行 INSERT 响应 1.44s→0.88s；批量写入 0.78s→0.57s |
 | v9 | `227d65b11` | 11-10 12:00 | 超内存数据流式执行 + 按行立即回包协议加固 | 3M 行/1.66GiB 数据匿名 RSS 仅 245MiB；官方形状查询中位 503.9ms（与 v5 持平） |
 | v10 | `fd4263c05` | 11-10 13:30 | 增量压缩：快照重写分摊到每条语句，消除提交路径上的多秒停顿 | 1M 行装载最慢单响应 3.276→0.290s；3M 行最慢 1.177s；查询中位 393.0ms |
-| v11 | （见下） | 11-10 14:30 | 对齐官方 STDIO_PROTOCOL：stdout ready 握手、JSONL 请求解析、id/ok 响应信封、shutdown op | 官方 protocol_check 握手+公开 20/20 PASS；spec 双模 229/241 全绿；T_query 467.7ms、T_write 1659.0ms、I/O 5,971,968B 不变、Recall@10=1.0 |
+| v11 | `e540c7229` | 11-10 14:30 | 对齐官方 STDIO_PROTOCOL：stdout ready 握手、JSONL 请求解析、id/ok 响应信封、shutdown op | 官方 protocol_check 握手+公开 20/20 PASS；spec 双模 229/241 全绿；T_query 467.7ms、T_write 1659.0ms、I/O 5,971,968B 不变、Recall@10=1.0 |
 
 ## 权威对比：v0 vs v5（逐轮交替配对 A/B，各 6 轮）
 
