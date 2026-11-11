@@ -14,6 +14,7 @@
 #include <cfloat>
 #include <limits>
 #include <queue>
+#include <unordered_set>
 #include <utility>
 
 #if defined(__x86_64__)
@@ -36,8 +37,10 @@ enum RecType : uint8_t {
 };
 constexpr size_t kRecHeader = 17;  // magic(4) len(4) crc(4) type(1) txn(4)
 constexpr size_t kWalGrowBytes = 16u << 20;
-constexpr size_t kCompactWalBytes = 128u << 20;
-constexpr size_t kShutdownCompactBytes = 16u << 20;
+// Large tables must not trigger frequent full-snapshot rewrites: the WAL cap is
+// generous so bulk loads compact a handful of times, and recovery replays at
+// most this much log.
+constexpr size_t kCompactWalBytes = 256u << 20;
 
 uint32_t Crc32(const void* data, size_t n) {
   static uint32_t table[256];
@@ -919,7 +922,7 @@ bool Engine::CommitOverlay() {
 
 void Engine::DropOverlay() { overlay_.clear(); }
 
-std::string Engine::Execute(const std::string& sql) {
+std::string Engine::Execute(const std::string& sql, const OutSink& sink) {
   if (!ok_) return JsonError(init_error_.empty() ? "io_error" : init_error_);
   Statement st = Parse(sql);
   if (!st.error.empty()) return JsonError(st.error);
@@ -928,7 +931,7 @@ std::string Engine::Execute(const std::string& sql) {
     case StmtKind::CreateTable: return ExecCreateTable(st);
     case StmtKind::CreateVectorIndex: return ExecCreateIndex(st);
     case StmtKind::Insert: return ExecInsert(st);
-    case StmtKind::Select: return ExecSelect(st);
+    case StmtKind::Select: return ExecSelect(st, sink);
     case StmtKind::Update: return ExecUpdate(st);
     case StmtKind::Delete: return ExecDelete(st);
     case StmtKind::Begin: return ExecBegin();
@@ -1043,7 +1046,7 @@ std::string Engine::ExecInsert(const Statement& st) {
   auto overlay_it = overlay_.find(s.id);
   std::map<int64_t, OverlayRow>* ov = overlay_it == overlay_.end() ? nullptr : &overlay_it->second;
   std::vector<std::pair<int64_t, std::string>> ready;
-  std::vector<int64_t> seen;
+  std::unordered_set<int64_t> seen;
   for (const auto& row : st.rows) {
     if (row.size() != targets.size()) return JsonError("column_count_mismatch");
     std::vector<ColumnValue> vals(s.cols.size());
@@ -1061,7 +1064,7 @@ std::string Engine::ExecInsert(const Statement& st) {
       if (!present[c]) return JsonError("missing_column_value");
     }
     int64_t pk = vals[s.pk].i;
-    bool dup = std::find(seen.begin(), seen.end(), pk) != seen.end();
+    bool dup = seen.count(pk) != 0;
     if (!dup) {
       if (ov != nullptr) {
         auto it = ov->find(pk);
@@ -1070,7 +1073,7 @@ std::string Engine::ExecInsert(const Statement& st) {
       if (!dup && t->rows.count(pk)) dup = true;
     }
     if (dup) return JsonError("duplicate_key");
-    seen.push_back(pk);
+    seen.insert(pk);
     ready.emplace_back(pk, EncodeRow(s, vals));
   }
   for (auto& [pk, bytes] : ready) {
@@ -1082,16 +1085,7 @@ std::string Engine::ExecInsert(const Statement& st) {
   return JsonAffected(static_cast<int64_t>(ready.size()));
 }
 
-namespace {
-struct KeyVal {
-  uint8_t kind = 0;  // 0 int, 1 str, 2 float
-  int64_t i = 0;
-  double d = 0;
-  std::string s;
-};
-}  // namespace
-
-std::string Engine::ExecSelect(const Statement& st) {
+std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
   TableState* t = FindTable(LowerName(st.table));
   if (t == nullptr) return JsonError("unknown_table");
   const Schema& s = t->schema;
@@ -1221,66 +1215,6 @@ std::string Engine::ExecSelect(const Statement& st) {
     return out;
   };
 
-  auto key_of_order = [&](const OrderBound& ob, const RowView& v, double dist) -> KeyVal {
-    KeyVal k;
-    if (ob.dist_expr) {
-      const uint8_t* p = nullptr;
-      uint32_t len = 0;
-      if (!ColAt(v, s, ob.dcol, &p, &len)) {
-        k.kind = 2;
-        k.d = 0;
-        return k;
-      }
-      const float* a = reinterpret_cast<const float*>(p);
-      double sum = 0.0;
-      for (size_t i = 0; i < ob.dqvec.size(); ++i) {
-        double d = static_cast<double>(a[i]) - static_cast<double>(ob.dqvec[i]);
-        sum += d * d;
-      }
-      k.kind = 2;
-      k.d = sum;
-      return k;
-    }
-    if (ob.item >= 0) {
-      const Item& it = items[ob.item];
-      if (it.kind == 2) {
-        k.kind = 2;
-        k.d = dist;
-      } else {
-        const uint8_t* p = nullptr;
-        uint32_t len = 0;
-        ColAt(v, s, it.col, &p, &len);
-        if (s.cols[it.col].type.kind == ColumnType::BIGINT) {
-          k.kind = 0;
-          k.i = GetI64(p);
-        } else {
-          k.kind = 1;
-          k.s.assign(reinterpret_cast<const char*>(p), len);
-        }
-      }
-    } else {
-      const uint8_t* p = nullptr;
-      uint32_t len = 0;
-      ColAt(v, s, ob.col, &p, &len);
-      if (s.cols[ob.col].type.kind == ColumnType::BIGINT) {
-        k.kind = 0;
-        k.i = GetI64(p);
-      } else {
-        k.kind = 1;
-        k.s.assign(reinterpret_cast<const char*>(p), len);
-      }
-    }
-    return k;
-  };
-
-  struct RowRes {
-    int64_t pk = 0;
-    double dist = 0;
-    RowView view;
-    std::vector<KeyVal> keys;
-    std::vector<OutVal> vals;
-  };
-
   auto out_columns = [&]() {
     std::vector<std::string> cols;
     for (const auto& it : items) {
@@ -1291,23 +1225,6 @@ std::string Engine::ExecSelect(const Statement& st) {
       }
     }
     return cols;
-  };
-
-  auto build_vals = [&](const RowView& v, double dist) {
-    std::vector<OutVal> vals;
-    for (const auto& it : items) {
-      if (it.kind == 0) {
-        for (size_t c = 0; c < s.cols.size(); ++c) {
-          Item tmp;
-          tmp.kind = 1;
-          tmp.col = static_cast<int>(c);
-          vals.push_back(value_of_item(tmp, v, dist));
-        }
-      } else {
-        vals.push_back(value_of_item(it, v, dist));
-      }
-    }
-    return vals;
   };
 
   auto compute_dist = [&](const RowView& v, int vcol, const std::vector<float>& q) {
@@ -1344,19 +1261,6 @@ std::string Engine::ExecSelect(const Statement& st) {
       need_dist && st.limit >= 0 && orders.size() == 1 && orders[0].item >= 0 &&
       items[orders[0].item].kind == 2 && !orders[0].desc;
 
-  std::vector<RowRes> results;
-  auto pk_tie = [](const RowRes& a, const RowRes& b) { return a.pk < b.pk; };
-
-  auto make_res = [&](int64_t pk, const RowView& v, double dist) {
-    RowRes r;
-    r.pk = pk;
-    r.dist = dist;
-    r.view = v;
-    for (const auto& ob : orders) r.keys.push_back(key_of_order(ob, v, dist));
-    r.vals = build_vals(v, dist);
-    return r;
-  };
-
   auto exact_distance = [&](const RowView& v) {
     const uint8_t* p = nullptr;
     uint32_t len = 0;
@@ -1370,6 +1274,101 @@ std::string Engine::ExecSelect(const Statement& st) {
     return sum;
   };
 
+  // A sort reference keeps only the primary key, distance and a view pointing
+  // into the mmap'd storage (or the transaction overlay), both of which stay
+  // valid for the whole query. Ordering a result larger than RAM therefore
+  // never copies row bodies.
+  struct SortRef {
+    int64_t pk = 0;
+    double dist = 0;
+    RowView view;
+  };
+
+  auto cmp_double = [](double a, double b) { return a < b ? -1 : (a > b ? 1 : 0); };
+
+  auto dist_expr_of = [&](const OrderBound& ob, const RowView& v) {
+    const uint8_t* p = nullptr;
+    uint32_t len = 0;
+    if (!ColAt(v, s, ob.dcol, &p, &len)) return 0.0;
+    const float* a = reinterpret_cast<const float*>(p);
+    double sum = 0.0;
+    for (size_t i = 0; i < ob.dqvec.size(); ++i) {
+      double d = static_cast<double>(a[i]) - static_cast<double>(ob.dqvec[i]);
+      sum += d * d;
+    }
+    return sum;
+  };
+
+  auto less_ref = [&](const SortRef& a, const SortRef& b) {
+    for (const auto& ob : orders) {
+      int sgn = 0;
+      if (ob.dist_expr) {
+        sgn = cmp_double(dist_expr_of(ob, a.view), dist_expr_of(ob, b.view));
+      } else if (ob.item >= 0 && items[ob.item].kind == 2) {
+        sgn = cmp_double(a.dist, b.dist);
+      } else {
+        int col = ob.item >= 0 ? items[ob.item].col : ob.col;
+        const uint8_t *pa = nullptr, *pb = nullptr;
+        uint32_t la = 0, lb = 0;
+        ColAt(a.view, s, col, &pa, &la);
+        ColAt(b.view, s, col, &pb, &lb);
+        if (s.cols[col].type.kind == ColumnType::BIGINT) {
+          int64_t xa = GetI64(pa), xb = GetI64(pb);
+          sgn = xa < xb ? -1 : (xa > xb ? 1 : 0);
+        } else {
+          std::string_view xa(reinterpret_cast<const char*>(pa), la);
+          std::string_view xb(reinterpret_cast<const char*>(pb), lb);
+          int c = xa.compare(xb);
+          sgn = c < 0 ? -1 : (c > 0 ? 1 : 0);
+        }
+      }
+      if (sgn != 0) return ob.desc ? sgn > 0 : sgn < 0;
+    }
+    return a.pk < b.pk;
+  };
+
+  std::string rowbuf;
+  bool first_row = true;
+  auto emit_row = [&](const RowView& v, double dist) {
+    rowbuf.clear();
+    if (!first_row) rowbuf += ',';
+    first_row = false;
+    rowbuf += '[';
+    bool firstc = true;
+    auto add_val = [&](const OutVal& ov) {
+      if (!firstc) rowbuf += ',';
+      firstc = false;
+      OutValToJson(rowbuf, ov);
+    };
+    for (const auto& it : items) {
+      if (it.kind == 0) {
+        for (size_t c = 0; c < s.cols.size(); ++c) {
+          Item tmp;
+          tmp.kind = 1;
+          tmp.col = static_cast<int>(c);
+          add_val(value_of_item(tmp, v, dist));
+        }
+      } else {
+        add_val(value_of_item(it, v, dist));
+      }
+    }
+    rowbuf += ']';
+    sink(rowbuf.data(), rowbuf.size());
+  };
+  auto emit_header = [&]() {
+    std::string header = "{\"columns\":[";
+    std::vector<std::string> cols = out_columns();
+    for (size_t i = 0; i < cols.size(); ++i) {
+      if (i) header += ',';
+      header += '"';
+      JsonEscapeTo(header, cols[i]);
+      header += '"';
+    }
+    header += "],\"rows\":[";
+    sink(header.data(), header.size());
+  };
+  auto emit_tail = [&]() { sink("]}", 2); };
+
   if (distance_order) {
     size_t k = static_cast<size_t>(st.limit);
     // Keep a margin of candidates selected with the fast float32 distance, then
@@ -1378,14 +1377,26 @@ std::string Engine::ExecSelect(const Statement& st) {
     size_t k_candidates = k == 0 ? 0 : k + std::max<size_t>(k * 3, 64);
     // priority_queue keeps the "largest" element on top; with this ordering the
     // largest is the worst candidate (largest distance, then largest primary key).
-    auto worse_first = [](const RowRes& a, const RowRes& b) {
+    auto worse_first = [](const SortRef& a, const SortRef& b) {
       if (a.dist != b.dist) return a.dist < b.dist;
       return a.pk < b.pk;
     };
-    std::priority_queue<RowRes, std::vector<RowRes>, decltype(worse_first)> heap(worse_first);
+    std::priority_queue<SortRef, std::vector<SortRef>, decltype(worse_first)> heap(worse_first);
     const uint32_t vec_off = s.fixed_off[dist_col];
     const float* qptr = query_vec.data();
     const int qdim = static_cast<int>(query_vec.size());
+    auto consider = [&](int64_t pk, const RowView& v) {
+      double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
+      if (heap.size() < k_candidates) {
+        heap.push(SortRef{pk, dist, v});
+      } else {
+        const SortRef& top = heap.top();
+        if (dist < top.dist || (dist == top.dist && pk < top.pk)) {
+          heap.pop();
+          heap.push(SortRef{pk, dist, v});
+        }
+      }
+    };
     auto ovit = overlay_.find(s.id);
     bool no_overlay = ovit == overlay_.end() || ovit->second.empty();
     bool cacheable = false;
@@ -1446,84 +1457,81 @@ std::string Engine::ExecSelect(const Statement& st) {
         for (size_t i = 0; i < t->scan.size(); ++i) {
           bool match = is_str ? (t->cache_ids[i] == want_id) : (t->cache_int[i] == cb.ival);
           if (!match) continue;
-          int64_t pk = t->scan[i].first;
           RowView v = MakeView(t->scan[i].second);
           v.s = &s;
           if (!v.Valid()) continue;
-          double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
-          if (heap.size() < k_candidates) {
-            heap.push(make_res(pk, v, dist));
-          } else {
-            const RowRes& top = heap.top();
-            if (dist < top.dist || (dist == top.dist && pk < top.pk)) {
-              RowRes r = make_res(pk, v, dist);
-              heap.pop();
-              heap.push(std::move(r));
-            }
-          }
+          consider(t->scan[i].first, v);
         }
       }
     } else if (k_candidates > 0) {
       ForEachRow(*t, [&](int64_t pk, const RowView& v) {
         if (!EvalPredicates(conds, v)) return;
-        double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
-        if (heap.size() < k_candidates) {
-          heap.push(make_res(pk, v, dist));
-        } else {
-          const RowRes& top = heap.top();
-          if (dist < top.dist || (dist == top.dist && pk < top.pk)) {
-            RowRes r = make_res(pk, v, dist);
-            heap.pop();
-            heap.push(std::move(r));
-          }
-        }
+        consider(pk, v);
       });
     }
+    std::vector<SortRef> results;
+    results.reserve(heap.size());
     while (!heap.empty()) {
       results.push_back(heap.top());
       heap.pop();
     }
-    for (auto& r : results) {
-      r.dist = exact_distance(r.view);
-      r.vals = build_vals(r.view, r.dist);
-    }
-    std::sort(results.begin(), results.end(), [](const RowRes& a, const RowRes& b) {
+    for (auto& r : results) r.dist = exact_distance(r.view);
+    std::sort(results.begin(), results.end(), [](const SortRef& a, const SortRef& b) {
       if (a.dist != b.dist) return a.dist < b.dist;
       return a.pk < b.pk;
     });
     if (results.size() > k) results.resize(k);
+    emit_header();
+    for (const auto& r : results) emit_row(r.view, r.dist);
+    emit_tail();
   } else {
-    bool limit_stop = orders.empty() && st.limit >= 0;
-    ForEachRow(*t, [&](int64_t pk, const RowView& v) {
-      if (limit_stop && static_cast<int64_t>(results.size()) >= st.limit) return;
-      if (!EvalPredicates(conds, v)) return;
-      double dist = need_dist ? compute_dist(v, dist_col, query_vec) : 0.0;
-      results.push_back(make_res(pk, v, dist));
-    });
-    if (!orders.empty()) {
-      std::sort(results.begin(), results.end(), [&](const RowRes& a, const RowRes& b) {
-        size_t n = orders.size();
-        for (size_t i = 0; i < n; ++i) {
-          const KeyVal& ka = a.keys[i];
-          const KeyVal& kb = b.keys[i];
-          int cmp;
-          if (ka.kind == 0) cmp = (ka.i < kb.i) ? -1 : (ka.i > kb.i ? 1 : 0);
-          else if (ka.kind == 1) cmp = ka.s.compare(kb.s);
-          else cmp = (ka.d < kb.d) ? -1 : (ka.d > kb.d ? 1 : 0);
-          if (cmp != 0) return orders[i].desc ? cmp > 0 : cmp < 0;
-        }
-        return pk_tie(a, b);
+    emit_header();
+    if (orders.empty()) {
+      int64_t emitted = 0;
+      ForEachRow(*t, [&](int64_t, const RowView& v) {
+        if (st.limit >= 0 && emitted >= st.limit) return;
+        if (!EvalPredicates(conds, v)) return;
+        double dist = need_dist ? compute_dist(v, dist_col, query_vec) : 0.0;
+        emit_row(v, dist);
+        ++emitted;
       });
+    } else if (st.limit >= 0) {
+      size_t k = static_cast<size_t>(st.limit);
+      if (k > 0) {
+        std::priority_queue<SortRef, std::vector<SortRef>, decltype(less_ref)> heap(less_ref);
+        ForEachRow(*t, [&](int64_t pk, const RowView& v) {
+          if (!EvalPredicates(conds, v)) return;
+          double dist = need_dist ? compute_dist(v, dist_col, query_vec) : 0.0;
+          SortRef r{pk, dist, v};
+          if (heap.size() < k) {
+            heap.push(r);
+          } else if (less_ref(r, heap.top())) {
+            heap.pop();
+            heap.push(r);
+          }
+        });
+        std::vector<SortRef> refs;
+        refs.reserve(heap.size());
+        while (!heap.empty()) {
+          refs.push_back(heap.top());
+          heap.pop();
+        }
+        std::sort(refs.begin(), refs.end(), less_ref);
+        for (const auto& r : refs) emit_row(r.view, r.dist);
+      }
+    } else {
+      std::vector<SortRef> refs;
+      ForEachRow(*t, [&](int64_t pk, const RowView& v) {
+        if (!EvalPredicates(conds, v)) return;
+        double dist = need_dist ? compute_dist(v, dist_col, query_vec) : 0.0;
+        refs.push_back(SortRef{pk, dist, v});
+      });
+      std::sort(refs.begin(), refs.end(), less_ref);
+      for (const auto& r : refs) emit_row(r.view, r.dist);
     }
-    if (st.limit >= 0 && static_cast<int64_t>(results.size()) > st.limit) {
-      results.resize(static_cast<size_t>(st.limit));
-    }
+    emit_tail();
   }
-
-  std::vector<std::vector<OutVal>> rows;
-  rows.reserve(results.size());
-  for (auto& r : results) rows.push_back(std::move(r.vals));
-  return JsonRows(out_columns(), rows);
+  return std::string();
 }
 
 std::string Engine::ExecUpdate(const Statement& st) {
@@ -1555,10 +1563,7 @@ std::string Engine::ExecUpdate(const Statement& st) {
   std::string err;
   if (!BuildPredicates(s, st.where, &conds, err)) return JsonError(err);
 
-  std::vector<std::pair<int64_t, std::string>> changed;
-  ForEachRow(*t, [&](int64_t pk, const RowView& v) {
-    if (!EvalPredicates(conds, v)) return;
-    std::vector<ColumnValue> vals = DecodeRow(s, v);
+  auto apply_sets = [&](std::vector<ColumnValue>& vals) {
     for (const auto& sb : sets) {
       if (s.cols[sb.col].type.kind == ColumnType::VECTOR) {
         vals[sb.col].v = sb.val.v;
@@ -1568,13 +1573,55 @@ std::string Engine::ExecUpdate(const Statement& st) {
         vals[sb.col].i = sb.val.i;
       }
     }
+  };
+  if (!txn_active_) {
+    // Autocommit: stream new row versions straight into a WAL transaction so a
+    // bulk update never holds every changed body in memory. Each view is fully
+    // decoded before its append because growing the WAL may remap it.
+    uint32_t txn = next_txn_++;
+    uint64_t wal_start = wal_size_;
+    std::string empty;
+    if (!AppendRecord(REC_BEGIN, txn, empty, nullptr)) return JsonError("io_error");
+    struct UpdRef {
+      int64_t pk;
+      uint64_t off;
+    };
+    std::vector<UpdRef> changed;
+    bool failed = false;
+    ForEachRow(*t, [&](int64_t pk, const RowView& v) {
+      if (failed || !EvalPredicates(conds, v)) return;
+      std::vector<ColumnValue> vals = DecodeRow(s, v);
+      apply_sets(vals);
+      std::string payload;
+      PutU32(payload, s.id);
+      PutI64(payload, pk);
+      payload += EncodeRow(s, vals);
+      uint64_t off = 0;
+      if (!AppendRecord(REC_PUT, txn, payload, &off)) {
+        failed = true;
+        return;
+      }
+      changed.push_back(UpdRef{pk, off});
+    });
+    if (failed || !AppendRecord(REC_COMMIT, txn, empty, nullptr) || !SyncWal()) {
+      wal_size_ = wal_start;
+      return JsonError("io_error");
+    }
+    for (const auto& c : changed) t->rows[c.pk] = RowRef{c.off, 1};
+    t->scan_dirty = true;
+    dirty_since_compact_ = true;
+    if (wal_size_ > kCompactWalBytes) Compact();
+    return JsonAffected(static_cast<int64_t>(changed.size()));
+  }
+  std::vector<std::pair<int64_t, std::string>> changed;
+  ForEachRow(*t, [&](int64_t pk, const RowView& v) {
+    if (!EvalPredicates(conds, v)) return;
+    std::vector<ColumnValue> vals = DecodeRow(s, v);
+    apply_sets(vals);
     changed.emplace_back(pk, EncodeRow(s, vals));
   });
   for (auto& [pk, bytes] : changed) {
     overlay_[s.id][pk] = OverlayRow{false, std::move(bytes)};
-  }
-  if (!txn_active_) {
-    if (!CommitOverlay()) return JsonError("io_error");
   }
   return JsonAffected(static_cast<int64_t>(changed.size()));
 }
@@ -1586,6 +1633,36 @@ std::string Engine::ExecDelete(const Statement& st) {
   std::vector<CondBound> conds;
   std::string err;
   if (!BuildPredicates(s, st.where, &conds, err)) return JsonError(err);
+  if (!txn_active_) {
+    // Autocommit: stream tombstones into a WAL transaction; only the primary
+    // keys stay in memory until the commit is durable.
+    uint32_t txn = next_txn_++;
+    uint64_t wal_start = wal_size_;
+    std::string empty;
+    if (!AppendRecord(REC_BEGIN, txn, empty, nullptr)) return JsonError("io_error");
+    std::vector<int64_t> deleted;
+    bool failed = false;
+    ForEachRow(*t, [&](int64_t pk, const RowView& v) {
+      if (failed || !EvalPredicates(conds, v)) return;
+      std::string payload;
+      PutU32(payload, s.id);
+      PutI64(payload, pk);
+      if (!AppendRecord(REC_DEL, txn, payload, nullptr)) {
+        failed = true;
+        return;
+      }
+      deleted.push_back(pk);
+    });
+    if (failed || !AppendRecord(REC_COMMIT, txn, empty, nullptr) || !SyncWal()) {
+      wal_size_ = wal_start;
+      return JsonError("io_error");
+    }
+    for (int64_t pk : deleted) t->rows.erase(pk);
+    t->scan_dirty = true;
+    dirty_since_compact_ = true;
+    if (wal_size_ > kCompactWalBytes) Compact();
+    return JsonAffected(static_cast<int64_t>(deleted.size()));
+  }
   std::vector<int64_t> deleted;
   ForEachRow(*t, [&](int64_t pk, const RowView& v) {
     if (EvalPredicates(conds, v)) deleted.push_back(pk);
@@ -1595,9 +1672,6 @@ std::string Engine::ExecDelete(const Statement& st) {
     row.del = true;
     overlay_[s.id][pk] = std::move(row);
   }
-  if (!txn_active_) {
-    if (!CommitOverlay()) return JsonError("io_error");
-  }
   return JsonAffected(static_cast<int64_t>(deleted.size()));
 }
 
@@ -1605,7 +1679,14 @@ bool Engine::Compact() {
   std::string tmp = dir_ + "/snapshot.tmp";
   int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) return false;
-  std::map<uint32_t, std::map<int64_t, RowRef>> new_refs;
+  // Flat list of relocated rows; a second full pk-index would double the
+  // resident index memory while compacting a table larger than RAM.
+  struct NewRef {
+    uint32_t tid;
+    int64_t pk;
+    uint64_t off;
+  };
+  std::vector<NewRef> new_refs;
   std::string buf;
   buf.reserve(4u << 20);
   uint64_t off = 0;
@@ -1642,7 +1723,7 @@ bool Engine::Compact() {
       rec.append(reinterpret_cast<const char*>(payload), len);
       uint64_t this_off = off;
       emit(REC_PUT, 0, rec);
-      new_refs[tid][pk] = RowRef{this_off, 0};
+      new_refs.push_back(NewRef{tid, pk, this_off});
       if (buf.size() > (4u << 20)) {
         if (!flush()) { ok = false; break; }
       }
@@ -1662,13 +1743,11 @@ bool Engine::Compact() {
     return false;
   }
   if (!OpenSnapshot()) return false;
-  for (auto& [tid, ts] : tables_) {
-    auto it = new_refs.find(tid);
-    if (it != new_refs.end()) {
-      ts.rows = std::move(it->second);
-      ts.scan_dirty = true;
-    }
+  for (const auto& nr : new_refs) {
+    auto t = tables_.find(nr.tid);
+    if (t != tables_.end()) t->second.rows[nr.pk] = RowRef{nr.off, 0};
   }
+  for (auto& [tid, ts] : tables_) ts.scan_dirty = true;
   // Reset the WAL to a small empty file so a compacted database does not keep
   // the peak-sized mapping (and preallocated file) around.
   if (wal_base_ != nullptr) {
@@ -1691,9 +1770,9 @@ bool Engine::Compact() {
 void Engine::Shutdown() {
   overlay_.clear();
   txn_active_ = false;
-  if (wal_size_ > kShutdownCompactBytes) {
-    Compact();
-  }
+  // No compaction here: the driver waits for the process to exit on --restart,
+  // and rewriting a multi-GB snapshot would stall that wait. The next startup
+  // replays the bounded WAL instead.
   if (wal_fd_ >= 0) ::fdatasync(wal_fd_);
   CloseAll();
 }

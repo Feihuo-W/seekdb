@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -46,8 +47,12 @@ class Engine {
   bool Ok() const { return ok_; }
   const std::string& InitError() const { return init_error_; }
 
-  // Executes a single SQL statement and returns one compact JSON object.
-  std::string Execute(const std::string& sql);
+  // Executes a single SQL statement. Non-query responses are returned as one
+  // compact JSON object; query results are streamed through `sink` (without a
+  // trailing newline) and an empty string is returned, so results larger than
+  // RAM never need to be materialized.
+  using OutSink = std::function<void(const char*, size_t)>;
+  std::string Execute(const std::string& sql, const OutSink& sink);
 
   void SetAnnMode(bool on) { ann_ = on; }
   void Shutdown();
@@ -141,7 +146,7 @@ class Engine {
   std::string ExecCreateTable(const Statement& st);
   std::string ExecCreateIndex(const Statement& st);
   std::string ExecInsert(const Statement& st);
-  std::string ExecSelect(const Statement& st);
+  std::string ExecSelect(const Statement& st, const OutSink& sink);
   std::string ExecUpdate(const Statement& st);
   std::string ExecDelete(const Statement& st);
   std::string ExecBegin();

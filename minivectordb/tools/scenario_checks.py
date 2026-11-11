@@ -185,7 +185,9 @@ def scale(binary, datadir, rows, dim):
     files = {f: os.path.getsize(os.path.join(datadir, f)) for f in os.listdir(datadir)}
     print("files", {f: s // (1 << 20) for f, s in files.items()})
     if rows * dim >= 200000:
-        chk("snapshot created", "snapshot.dat" in files, True)
+        # Shutdown no longer rewrites a snapshot (the driver waits for a prompt
+        # exit); durability lives in the WAL until runtime compaction kicks in.
+        chk("durable files present", ("snapshot.dat" in files) or ("wal.log" in files), True)
     db = db.reopen()
     chk("scale row present", db.q("SELECT id FROM big WHERE id=%d" % (rows - 1)),
         {"columns": ["id"], "rows": [[rows - 1]]})

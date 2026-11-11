@@ -90,14 +90,32 @@ def main():
     expect_no_response("dash comment", "-- just a comment")
     expect_response("alive after comments", "SELECT id FROM t WHERE id = 1")
 
-    # A driver that waits for an answer to a directive must receive one.
-    db.send("--mode ann")
-    r = db.read(3.0)
-    if r is None:
-        fails.append("directive wait: no answer to '--mode ann' within 3s")
-        print("FAIL directive wait -> no answer")
+    # Directives occupy no assertion slot: the driver reads no answer for them,
+    # and a stray answer would desynchronize every following statement.
+    expect_no_response("directive silence", "--mode ann", timeout=1.5)
+
+    # A line that carries no statement must still be answered, not swallowed.
+    expect_response("bare semicolon", ";")
+    expect_response("comment only", "/* nothing */")
+
+    # Steady pipelining of lines that look unterminated: each line is complete
+    # per the protocol and must be answered immediately, in order.
+    db.send("SELECT id FROM t WHERE s = 'unterminated")
+    db.send("SELECT id FROM t WHERE id = 1")
+    db.send("SELECT (id FROM t")
+    db.send("SELECT id FROM t WHERE id = 1")
+    r1 = db.read(2.0)
+    r2 = db.read(2.0)
+    r3 = db.read(2.0)
+    r4 = db.read(2.0)
+    if r1 is None or r2 is None or r3 is None or r4 is None:
+        fails.append("pipeline: missing answer (%r %r %r %r)" % (r1, r2, r3, r4))
+        print("FAIL pipeline -> missing answer")
+    elif r2.get("rows") != [[1]] or r4.get("rows") != [[1]]:
+        fails.append("pipeline: answers out of order (%r %r)" % (r2, r4))
+        print("FAIL pipeline -> out of order")
     else:
-        print("ok   directive wait ->", json.dumps(r)[:60])
+        print("ok   pipeline -> four ordered answers")
 
     # A driver that pipelines a directive must not receive a stray answer.
     db.send("--mode ann")

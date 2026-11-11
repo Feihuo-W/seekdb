@@ -1,200 +1,218 @@
 {
-  "material_version": "minivectordb-conversation-v1",
-  "rule_version": "agent-learning-evidence-v3-unbounded",
-  "synthetic": false,
-  "project": {
-    "name": "MiniVectorDB",
-    "competition_branch": "2026-competition-round2",
-    "date": "2026-11-09",
-    "language": "C++17",
-    "artifacts": [
-      "minivectordb/src",
-      "minivectordb/tools/run_cases.py",
-      "minivectordb/README.md",
-      "Dockerfile",
-      "conversation.json"
-    ]
-  },
-  "attribution": "本文件按来源区分内容：user_prompts 是学生本人在本次会话中的原始输入（原文）；conversations 是 Agent 的执行说明；experiments 是 Agent 在本机运行的真实命令与截取输出。没有学生本人独立提出的技术解释、预测或反例，因此本材料不声称存在对应的学生理解证据。",
-  "user_prompts": [
-    {
-      "id": "u1",
-      "content": "拉取题目最新的加赛分支"
-    },
-    {
-      "id": "u2",
-      "content": "请你记录好加赛题内容",
-      "note": "学生粘贴了加赛题一《完成一个轻量向量数据库》的完整题面，要求记录。Agent 将其整理为 2026题目/加赛-赛题一-轻量向量数据库MiniVectorDB.md 并更新目录。"
-    },
-    {
-      "id": "u3",
-      "content": "注意拉取到新分支，不要和已有分支混淆",
-      "note": "学生要求在独立的新分支上拉取加赛代码，避免与 fix/2026-06-worker-sql-ready、amd-v5-verified 等既有分支混在一起。Agent 新建本地分支 2026-competition-round2 跟踪 origin/2026-competition-round2，未合并、未改动既有分支。"
-    },
-    {
-      "id": "u4",
-      "content": "拉取之后你就可以开始做题了"
-    }
-  ],
-  "conversations": [
-    {
-      "id": "c1",
-      "source": "agent",
-      "content": "识别出加赛分支为 origin/2026-competition-round2（最新提交 9f6df2ba5，upload more cases），创建独立本地跟踪分支并检出；确认既有分支指针未变化。"
-    },
-    {
-      "id": "c2",
-      "source": "agent",
-      "content": "阅读 mysqltest/README.md、manifest.json 与 20 个公开用例的 .test/.result，确定驱动语义：每行一条 SQL、每条 SQL 对应一个 JSON 断言；--restart 复用数据目录；--mode ann 切换模式；空对象表示成功，error 表示非空错误码对齐。"
-    },
-    {
-      "id": "c3",
-      "source": "agent",
-      "content": "实现 C++17 单机引擎：手写词法/递归下降解析器；WAL+快照持久化到 /data；单显式事务 overlay；启动重放已提交事务；精确 TopK 与过滤后 TopK；AVX2/FMA 距离计算。"
-    }
-  ],
-  "experiments": [
-    {
-      "id": "e1",
-      "source": "tool",
-      "question": "公开题包 20 个用例是否能全部通过？",
-      "command": "python3 minivectordb/tools/run_cases.py",
-      "result": "20/20 cases passed",
-      "interpretation": "首次运行即全部通过；用例覆盖 CRUD、排序、主键冲突、持久化重启、过滤后 TopK、float32 语义、索引维护、事务失败原子性与正常关闭回滚。"
-    },
-    {
-      "id": "e2",
-      "source": "tool",
-      "question": "进程被强杀后，已提交数据是否保留、未提交事务是否整体丢弃？",
-      "command": "python3 /tmp/crash_test.py（BEGIN + UPDATE + INSERT 后 kill -9，再重启查询）",
-      "result": "after crash sel {\"columns\":[\"id\",\"s\"],\"rows\":[[1,\"a\"],[2,\"b\"]]}；after crash2 中 id=2 返回 \"q\"",
-      "interpretation": "未提交事务的两条修改都未出现；提交后的修改在强杀后保留，符合“确认提交必须持久、未提交不得部分生效”的要求。"
-    },
-    {
-      "id": "e3",
-      "source": "tool",
-      "question": "基准形状（10k 行、128 维、1000 次 TopK）的耗时与内存如何？",
-      "command": "python3 /tmp/bench.py",
-      "result": "insert 10000 rows in 2.30s；1000 queries in 0.58s；VmHWM 10.7MB；restart+first query 0.02s",
-      "interpretation": "优化前查询为 2.51s，定位到 TopK 路径对每个候选行都构造输出值与字符串；改为先算距离、仅对入选行构造结果后降至 0.58s（约 4.3 倍）。"
-    },
-    {
-      "id": "e4",
-      "source": "tool",
-      "question": "WAL 增长后的压缩路径是否安全？",
-      "command": "python3 /tmp/compact_test.py（40k 行 × 128 维，正常关闭触发压缩，重启后查询）",
-      "result": "shutdown 0.15s；files snapshot.dat 22199517 bytes；post sel 返回 [7,\"zz\"],[9,\"c9\"]；top3 距离正常",
-      "interpretation": "快照写入并原子替换后截断 WAL；重启加载快照得到一致的提交状态，更新与删除在压缩后依然生效。"
-    },
-    {
-      "id": "e5",
-      "source": "tool",
-      "question": "数据量明显大于常驻结构时，扫描是否仍保持内存有界？",
-      "command": "python3 /tmp/mem_test.py（200k 行 × 16 维，过滤查询、过滤后 TopK、恢复期连续强杀）",
-      "result": "insert 200k；VmHWM 37MB（数据文件约 22MB）；三次在启动 10ms 内强杀后重启查询 0.08s 返回正确行",
-      "interpretation": "内存约为数据文件的 1.7 倍（含页缓存），未整表载入；恢复只读不写，恢复中再次被杀仍可重复恢复。"
-    },
-    {
-      "id": "e6",
-      "source": "tool",
-      "question": "非法向量与不支持语句是否返回明确错误？",
-      "command": "python3 /tmp/edge_test.py",
-      "result": "NaN/Infinity/1e40 -> invalid_vector；[1,2] 对 VECTOR(3) -> dimension_mismatch；DROP TABLE -> unsupported_sql；BEGIN 中再次 BEGIN -> transaction_state_error；重复主键 -> duplicate_key",
-      "interpretation": "错误语义与公开结果文件中的命名一致，失败语句不留下部分修改（同批其余行未写入）。"
-    },
-    {
-      "id": "e7",
-      "source": "tool",
-      "question": "公开用例都是小表，TopK 在行数大于 K 时是否仍然正确？",
-      "command": "python3 minivectordb/tools/fuzz_diff.py --seeds 20 --steps 200",
-      "result": "首轮 0/6 seeds 通过：14 行、LIMIT 10 时引擎返回 [11,3,6,7,1,2,0,4,9,8]，独立参考模型为 [11,5,3,6,10,7,13,1,2,0]。加入候选距离日志后确认扫描距离都正确，根因是优先队列比较器方向写反，top() 得到最优而非最差候选，于是淘汰了最好的行。修正比较器并改为 K+余量候选、再用 double 复核截断后，20/20 seeds × 200 步通过，公开用例仍 20/20。",
-      "interpretation": "公开题包的行数都不超过 K，因此不会触发淘汰路径；用独立模型做差分测试才覆盖到该缺陷。该缺陷会直接导致正式准入的 TopK 用例失败。"
-    },
-    {
-      "id": "e8",
-      "source": "tool",
-      "question": "多表事务、语句失败原子性、ann 模式一致性以及百万行规模是否满足正式要求？",
-      "command": "python3 minivectordb/tools/scenario_checks.py（多表事务、语句失败原子性、双引号与表级主键、ann/exact 等价、强杀回滚）；规模场景见 e9/e10",
-      "result": "多表事务提交/回滚与重启后状态一致；三类失败语句均返回 value_too_long / dimension_mismatch / duplicate_key，且此前修改保留、失败语句无部分生效；ann 与 exact 结果完全相同（重启后仍一致）；1,000,000 行写入 32.7s，过滤后 TopK 0.044s，峰值内存 231MB，关闭压缩后 snapshot 164MB，重启恢复 0.53s。",
-      "interpretation": "这些场景公开题包未覆盖或只有小数据版本；结果说明事务原子性、多表一致性与大数据扫描路径在实现中成立。内存随数据规模增长主要来自 mmap 文件页，行数据不常驻堆内存。"
-    },
-    {
-      "id": "e9",
-      "source": "tool",
-      "question": "运行期 WAL 超阈值是否会自动压缩，压缩后是否仍可查询？",
-      "command": "本地临时脚本（未入库）：500,000 行 × 64 维，写入过程中 WAL 超过 128MiB",
-      "result": "写入 28.4s；重启前 data 目录已出现 snapshot.dat（128MiB）与 wal.log，说明运行期压缩在关闭前已触发；随后查询与重启后查询（0.39s）结果正确。",
-      "interpretation": "运行期压缩路径与关闭压缩路径都实际执行过；快照原子替换后再截断 WAL，恢复读取一致。"
-    },
-    {
-      "id": "e10",
-      "source": "tool",
-      "question": "随机强杀（含恢复途中再次强杀）与“快照已存在 + 未提交事务被强杀”是否保持一致性？",
-      "command": "python3 minivectordb/tools/fuzz_diff.py --crash --seeds 10 --steps 200；本地临时脚本：520,000 行 × 64 维触发运行期压缩后开启事务（更新/删除/插入）再 kill -9",
-      "result": "崩溃模糊测试 10/10 seeds 通过（每步随机选择是否强杀，且 0-2 次在恢复期间再次强杀，重启后与参考模型逐行一致）。定向脚本显示：写入过程中已生成 snapshot.dat（128MiB）；事务内 SELECT 能看到自己的修改（id=10 返回 TXN，等值过滤 TopK 返回 [10]）；kill -9 重启后 id=10 恢复为 c0、id=11 仍在、id=999999 不存在、已提交的 id=519999 完好。",
-      "interpretation": "恢复只读不写且按 CRC 截断残缺尾部，因此在快照存在、恢复期被反复强杀、事务未提交等组合下都能重复恢复到同一已提交状态；未提交修改整体丢弃，符合崩溃模型。"
-    },
-    {
-      "id": "e11",
-      "source": "tool",
-      "question": "压缩生成快照后继续写入再强杀，恢复是否能正确叠加快照与 WAL？",
-      "command": "本地临时脚本（未入库）：40,000 行 × 128 维写入并更新/删除后正常重启触发压缩；随后再写 40,000 行并更新/删除，直接 kill -9；重启核对",
-      "result": "压缩后 snapshot.dat 21MiB、wal.log 收缩为 16MiB；重启后 id=5 为压缩前的 SNAP、id=6 已删除；再写入阶段在强杀后保留：id=7 为 WAL、id=8 已删除、id=39999 与 id=79999 均存在；按 s='WAL' 过滤的 TopK 返回 [7]。",
-      "interpretation": "恢复顺序为“先快照、后 WAL 重放”，绝对记录使重放幂等；因此快照与 WAL 两个来源叠加后状态一致。"
-    },
-    {
-      "id": "e12",
-      "source": "tool",
-      "question": "查询热路径优化是否带来可测收益，且不影响正确性/召回/持久性？",
-      "command": "python3 minivectordb/tools/bench.py（官方形状 10k×128、1000 次 TopK）；同会话 A/B：基线二进制 e4cfce9a4 与优化二进制 347894135 各 5 轮交替",
-      "result": "A/B 查询中位 909.44ms→589.73ms（−35.2%）；写入中位 2290→2331ms（噪声内持平）；块 I/O 均 5,971,968 bytes；峰值 RSS 12,056→11,884kB；Recall@10 均 1.0，正确性与重启持久性均通过。微基准定位未过滤 TopK 为内存带宽受限：扁平扫描缓存使未过滤 TopK 0.984→0.692ms。",
-      "interpretation": "收益主要来自把红黑树逐节点遍历改为扁平有序数组顺序扫描（v2），辅以定长行布局/平方距离/4 累加器 SIMD（v1）与热路径直取偏移（v3）。写入受 fdatasync 支配、I/O 由数据量决定，故未变。跨时段单独跑分被宿主噪声混淆，因此采用同会话 A/B 作为权威对比。详见 minivectordb/PERFORMANCE.md。"
-    },
-    {
-      "id": "e13",
-      "source": "tool",
-      "question": "过滤查询优化的真实收益是多少？先前 A/B 结论是否被测量方法偏差放大？",
-      "command": "逐轮交替配对 A/B：v0 与 v5 各跑 6 轮单轮基准（v0→v5→v0→v5…），中位数比较；另用微基准分离查询类型",
-      "result": "配对结果 v0 查询中位 634.4ms、v5 500.4ms（−21.1%），单配对波动 466.6–766.9ms；微基准过滤后 TopK 0.402→0.211ms、过滤扫描 0.281→0.255ms。此前『先跑基线 5 轮再跑优化 5 轮』得到 −35.2%，改为交替配对后修正为 −21.1%。",
-      "interpretation": "过滤列缓存（v5）消除了行式布局的页粒度放大：过滤阶段只读紧凑标量数组，仅命中行读向量。顺序 A/B 会把机器预热/漂移计入优化收益，逐轮交替配对消除了该偏差，因此以 −21.1% 为准。"
-    },
-    {
-      "id": "e14",
-      "source": "tool",
-      "question": "过滤列缓存整数化（v6）是否有额外收益？",
-      "command": "同会话微基准（过滤 TopK）；交替配对 A/B v0/v6 与 v5/v6 各 6 轮",
-      "result": "微基准过滤 TopK 0.211→0.170ms；v0 vs v6 交替配对 766.2→614.1ms（−19.9%）；v5 vs v6 配对中位 552.2 vs 591.7ms（差异落在单轮 ±20% 噪声内）。",
-      "interpretation": "整数 intern 去掉了每行字符串比较，微基准可测；但整负载由未过滤查询与协议开销支配，配对 A/B 无法分辨 v5/v6 的真实差异，因此不声称整负载提升。缓存随 scan 重建失效、事务内回退通用路径，正确性经差分/崩溃/场景测试覆盖。"
-    },
-    {
-      "id": "e15",
-      "source": "tool",
-      "question": "按题面逐条自测能否覆盖正式要求的类型边界、语义、事务、恢复与协议变体？",
-      "command": "python3 minivectordb/tools/spec_suite.py",
-      "result": "套件后扩展至 229 项检查，全部通过：BIGINT 边界/溢出、VARCHAR 码点长度与 emoji、码点序比较、float32 舍入、NaN/Inf/维度/溢出拒绝与整句原子性、多列/无 WHERE 更新删除、排序并列按主键、过滤后 TopK、距离表达式排序、ann 与 exact 等价及重启、事务读己之写（含向量）、失败语句保留先前修改、回滚恢复内容与向量、正常关闭/强杀/恢复期重复强杀、NULL/JOIN/聚合/子查询/OR/!=/ALTER/外键/嵌套事务等不支持语句报错、CRLF/BOM/分号/一行多语句/空行协议变体。",
-      "interpretation": "公开题包只有 20 个样例且行数普遍 ≤K；该套件补齐了边界与失败路径，并已用它发现并修正 ORDER BY L2_DISTANCE(...) 表达式未支持的问题。仍无法覆盖组织方驱动的确切通信协议（公开题包不含驱动），需平台预检/日志确认。"
-    },
-    {
-      "id": "e16",
-      "source": "tool",
-      "question": "更刁钻的对抗与崩溃窗口能否暴露语义/恢复缺陷？",
-      "command": "python3 minivectordb/tools/spec_suite.py；python3 minivectordb/tools/stress_recovery.py（40k×128 关闭压缩期间随机 0-200ms 强杀 ×3、恢复期连杀 ×10、每次提交后强杀 ×12）",
-      "result": "229 项自测全过：嵌套 WHERE 括号、超长字面量比较、无 AS 别名、别名遮蔽、主键范围过滤 TopK、1024 维、float32 边界、512/513 字符与码点边界、Unicode 排序对拍、空串、码点序更新、无索引 ann、多表索引重启、事务内失败更新后可继续提交、边界并列、UTF-8 BOM/CRLF/分号/一行多语句、# 注释。压力脚本 0 失败：压缩窗口任意时刻强杀后行数/首尾/过滤计数/TopK 均正确；恢复期连杀 10 次仍可恢复；每次提交后强杀共 12 次，已确认提交逐次保留。",
-      "interpretation": "本轮据此修复/补齐：WHERE 支持括号；比较字面量不再受 VARCHAR 列长限制（仅存储时校验）；SELECT 支持无 AS 别名；支持 # 注释行；CREATE TABLE IF NOT EXISTS 幂等。崩溃窗口测试覆盖了快照 rename 与 WAL 截断/重建的各个阶段。"
-    },
-    {
-      "id": "e17",
-      "source": "tool",
-      "question": "平台反馈“JSON response timeout（未及时收到 JSON 响应）×1”，根因是什么？",
-      "command": "分析本地实现后编写 tools/hostile_driver.py（恶意输入必须逐行回一条 JSON）与 tools/stress_recovery.py；用 strace 思路复现",
-      "result": "定位到两条会导致“永不回包”的路径：① 为支持跨行语句而做的引号/括号配平缓冲，遇到单行内未闭合引号或括号时一直等待后续输入；② SQL 注释中的撇号被当成字符串起始（例如 `SELECT id FROM t -- don't`、未闭合引号的 INSERT），使语句被误判为未完成。修复：语句按行独立处理并在 300ms 空闲后强制回错误、SQL 注释（--/#//* */）在词法与配平阶段被忽略、任何输入行必定回一条 JSON。另补：若驱动在 `--mode` 指令后等待响应，则在驱动空闲 1.2s 后回一条 {}（流水线驱动不会收到多余响应）；并用快速浮点解析把单条 2 万行 INSERT 的响应时间从 1.44s 降到 0.88s。",
-      "interpretation": "平台提示“未及时收到 JSON 响应，请检查换行、flush 和程序阻塞”与上述两条路径一致：程序不是崩溃而是等不到输入、因而没有回包。hostile_driver.py 覆盖 20 余种恶意输入，全部逐行回包且流不错位，可作为该类故障的回归防线。"
-    }
-  ],
-  "retrospective": "本轮工作由 Agent 主导完成：先按公开题包反推协议，再实现存储/事务/查询，最后用公开用例、崩溃/压缩/内存测试与独立模型差分测试逐步加固。过程中确实暴露并修复了两类问题：TopK 路径的逐行分配瓶颈（2.51s→0.58s），以及大表 TopK 堆比较器方向错误（公开用例因行数≤K 无法发现）。仍然存在的取舍是 ANN 用精确扫描实现：召回率恒为 1.0，但查询成本随行数线性增长；主键到行偏移的常驻映射换取了随机访问速度，行数极大时映射自身会成为内存下限。",
-  "limitations": [
-    "学生在本次材料窗口内只给出了任务指令，没有留下独立的技术解释、预测、反例或对 Agent 结论的质疑，因此不能把 Agent 的规划与实现计入学生学习证据。",
-    "未实现真正的近似索引；ann 模式当前返回精确结果。",
-    "未实现 NULL、JOIN、聚合、子查询、ALTER TABLE、外键、嵌套事务与主键更新，均返回 unsupported_sql。"
+ "material_version": "minivectordb-conversation-v1",
+ "rule_version": "agent-learning-evidence-v3-unbounded",
+ "synthetic": false,
+ "project": {
+  "name": "MiniVectorDB",
+  "competition_branch": "2026-competition-round2",
+  "date": "2026-11-09",
+  "language": "C++17",
+  "artifacts": [
+   "minivectordb/src",
+   "minivectordb/tools/run_cases.py",
+   "minivectordb/README.md",
+   "Dockerfile",
+   "conversation.json"
   ]
+ },
+ "attribution": "本文件按来源区分内容：user_prompts 是学生本人在本次会话中的原始输入（原文）；conversations 是 Agent 的执行说明；experiments 是 Agent 在本机运行的真实命令与截取输出。没有学生本人独立提出的技术解释、预测或反例，因此本材料不声称存在对应的学生理解证据。",
+ "user_prompts": [
+  {
+   "id": "u1",
+   "content": "拉取题目最新的加赛分支"
+  },
+  {
+   "id": "u2",
+   "content": "请你记录好加赛题内容",
+   "note": "学生粘贴了加赛题一《完成一个轻量向量数据库》的完整题面，要求记录。Agent 将其整理为 2026题目/加赛-赛题一-轻量向量数据库MiniVectorDB.md 并更新目录。"
+  },
+  {
+   "id": "u3",
+   "content": "注意拉取到新分支，不要和已有分支混淆",
+   "note": "学生要求在独立的新分支上拉取加赛代码，避免与 fix/2026-06-worker-sql-ready、amd-v5-verified 等既有分支混在一起。Agent 新建本地分支 2026-competition-round2 跟踪 origin/2026-competition-round2，未合并、未改动既有分支。"
+  },
+  {
+   "id": "u4",
+   "content": "拉取之后你就可以开始做题了"
+  },
+  {
+   "id": "u5",
+   "content": "正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞）× 1。未执行性能评测。",
+   "note": "平台第二次反馈同一准入失败（单一用例 JSON 响应超时）。学生要求彻底定位并一次性通过。"
+  }
+ ],
+ "conversations": [
+  {
+   "id": "c1",
+   "source": "agent",
+   "content": "识别出加赛分支为 origin/2026-competition-round2（最新提交 9f6df2ba5，upload more cases），创建独立本地跟踪分支并检出；确认既有分支指针未变化。"
+  },
+  {
+   "id": "c2",
+   "source": "agent",
+   "content": "阅读 mysqltest/README.md、manifest.json 与 20 个公开用例的 .test/.result，确定驱动语义：每行一条 SQL、每条 SQL 对应一个 JSON 断言；--restart 复用数据目录；--mode ann 切换模式；空对象表示成功，error 表示非空错误码对齐。"
+  },
+  {
+   "id": "c3",
+   "source": "agent",
+   "content": "实现 C++17 单机引擎：手写词法/递归下降解析器；WAL+快照持久化到 /data；单显式事务 overlay；启动重放已提交事务；精确 TopK 与过滤后 TopK；AVX2/FMA 距离计算。"
+  },
+  {
+   "id": "c4",
+   "source": "agent",
+   "content": "重读题面与公开题包 README 后推翻上一轮的两个假设：① README 明确驱动指令不占断言位置，因此删除了空闲 ack（它会向驱动注入多余 JSON）；② 协议保证每非空行是一条完整 SQL，因此删除跨行配平缓冲，改为按行立即回包，空语句/纯注释行也回错误。另按题面 2.3『数据量超过内存限额』把执行器改为流式：SELECT 逐行输出、排序只存轻量引用、自动提交批量 UPDATE/DELETE 流式写 WAL、压缩不复制整表索引、正常关闭不再重写快照。用 3M 行/1.66GiB 数据验证匿名 RSS 仅 245MiB，全量回归与崩溃压力 0 失败。"
+  }
+ ],
+ "experiments": [
+  {
+   "id": "e1",
+   "source": "tool",
+   "question": "公开题包 20 个用例是否能全部通过？",
+   "command": "python3 minivectordb/tools/run_cases.py",
+   "result": "20/20 cases passed",
+   "interpretation": "首次运行即全部通过；用例覆盖 CRUD、排序、主键冲突、持久化重启、过滤后 TopK、float32 语义、索引维护、事务失败原子性与正常关闭回滚。"
+  },
+  {
+   "id": "e2",
+   "source": "tool",
+   "question": "进程被强杀后，已提交数据是否保留、未提交事务是否整体丢弃？",
+   "command": "python3 /tmp/crash_test.py（BEGIN + UPDATE + INSERT 后 kill -9，再重启查询）",
+   "result": "after crash sel {\"columns\":[\"id\",\"s\"],\"rows\":[[1,\"a\"],[2,\"b\"]]}；after crash2 中 id=2 返回 \"q\"",
+   "interpretation": "未提交事务的两条修改都未出现；提交后的修改在强杀后保留，符合“确认提交必须持久、未提交不得部分生效”的要求。"
+  },
+  {
+   "id": "e3",
+   "source": "tool",
+   "question": "基准形状（10k 行、128 维、1000 次 TopK）的耗时与内存如何？",
+   "command": "python3 /tmp/bench.py",
+   "result": "insert 10000 rows in 2.30s；1000 queries in 0.58s；VmHWM 10.7MB；restart+first query 0.02s",
+   "interpretation": "优化前查询为 2.51s，定位到 TopK 路径对每个候选行都构造输出值与字符串；改为先算距离、仅对入选行构造结果后降至 0.58s（约 4.3 倍）。"
+  },
+  {
+   "id": "e4",
+   "source": "tool",
+   "question": "WAL 增长后的压缩路径是否安全？",
+   "command": "python3 /tmp/compact_test.py（40k 行 × 128 维，正常关闭触发压缩，重启后查询）",
+   "result": "shutdown 0.15s；files snapshot.dat 22199517 bytes；post sel 返回 [7,\"zz\"],[9,\"c9\"]；top3 距离正常",
+   "interpretation": "快照写入并原子替换后截断 WAL；重启加载快照得到一致的提交状态，更新与删除在压缩后依然生效。"
+  },
+  {
+   "id": "e5",
+   "source": "tool",
+   "question": "数据量明显大于常驻结构时，扫描是否仍保持内存有界？",
+   "command": "python3 /tmp/mem_test.py（200k 行 × 16 维，过滤查询、过滤后 TopK、恢复期连续强杀）",
+   "result": "insert 200k；VmHWM 37MB（数据文件约 22MB）；三次在启动 10ms 内强杀后重启查询 0.08s 返回正确行",
+   "interpretation": "内存约为数据文件的 1.7 倍（含页缓存），未整表载入；恢复只读不写，恢复中再次被杀仍可重复恢复。"
+  },
+  {
+   "id": "e6",
+   "source": "tool",
+   "question": "非法向量与不支持语句是否返回明确错误？",
+   "command": "python3 /tmp/edge_test.py",
+   "result": "NaN/Infinity/1e40 -> invalid_vector；[1,2] 对 VECTOR(3) -> dimension_mismatch；DROP TABLE -> unsupported_sql；BEGIN 中再次 BEGIN -> transaction_state_error；重复主键 -> duplicate_key",
+   "interpretation": "错误语义与公开结果文件中的命名一致，失败语句不留下部分修改（同批其余行未写入）。"
+  },
+  {
+   "id": "e7",
+   "source": "tool",
+   "question": "公开用例都是小表，TopK 在行数大于 K 时是否仍然正确？",
+   "command": "python3 minivectordb/tools/fuzz_diff.py --seeds 20 --steps 200",
+   "result": "首轮 0/6 seeds 通过：14 行、LIMIT 10 时引擎返回 [11,3,6,7,1,2,0,4,9,8]，独立参考模型为 [11,5,3,6,10,7,13,1,2,0]。加入候选距离日志后确认扫描距离都正确，根因是优先队列比较器方向写反，top() 得到最优而非最差候选，于是淘汰了最好的行。修正比较器并改为 K+余量候选、再用 double 复核截断后，20/20 seeds × 200 步通过，公开用例仍 20/20。",
+   "interpretation": "公开题包的行数都不超过 K，因此不会触发淘汰路径；用独立模型做差分测试才覆盖到该缺陷。该缺陷会直接导致正式准入的 TopK 用例失败。"
+  },
+  {
+   "id": "e8",
+   "source": "tool",
+   "question": "多表事务、语句失败原子性、ann 模式一致性以及百万行规模是否满足正式要求？",
+   "command": "python3 minivectordb/tools/scenario_checks.py（多表事务、语句失败原子性、双引号与表级主键、ann/exact 等价、强杀回滚）；规模场景见 e9/e10",
+   "result": "多表事务提交/回滚与重启后状态一致；三类失败语句均返回 value_too_long / dimension_mismatch / duplicate_key，且此前修改保留、失败语句无部分生效；ann 与 exact 结果完全相同（重启后仍一致）；1,000,000 行写入 32.7s，过滤后 TopK 0.044s，峰值内存 231MB，关闭压缩后 snapshot 164MB，重启恢复 0.53s。",
+   "interpretation": "这些场景公开题包未覆盖或只有小数据版本；结果说明事务原子性、多表一致性与大数据扫描路径在实现中成立。内存随数据规模增长主要来自 mmap 文件页，行数据不常驻堆内存。"
+  },
+  {
+   "id": "e9",
+   "source": "tool",
+   "question": "运行期 WAL 超阈值是否会自动压缩，压缩后是否仍可查询？",
+   "command": "本地临时脚本（未入库）：500,000 行 × 64 维，写入过程中 WAL 超过 128MiB",
+   "result": "写入 28.4s；重启前 data 目录已出现 snapshot.dat（128MiB）与 wal.log，说明运行期压缩在关闭前已触发；随后查询与重启后查询（0.39s）结果正确。",
+   "interpretation": "运行期压缩路径与关闭压缩路径都实际执行过；快照原子替换后再截断 WAL，恢复读取一致。"
+  },
+  {
+   "id": "e10",
+   "source": "tool",
+   "question": "随机强杀（含恢复途中再次强杀）与“快照已存在 + 未提交事务被强杀”是否保持一致性？",
+   "command": "python3 minivectordb/tools/fuzz_diff.py --crash --seeds 10 --steps 200；本地临时脚本：520,000 行 × 64 维触发运行期压缩后开启事务（更新/删除/插入）再 kill -9",
+   "result": "崩溃模糊测试 10/10 seeds 通过（每步随机选择是否强杀，且 0-2 次在恢复期间再次强杀，重启后与参考模型逐行一致）。定向脚本显示：写入过程中已生成 snapshot.dat（128MiB）；事务内 SELECT 能看到自己的修改（id=10 返回 TXN，等值过滤 TopK 返回 [10]）；kill -9 重启后 id=10 恢复为 c0、id=11 仍在、id=999999 不存在、已提交的 id=519999 完好。",
+   "interpretation": "恢复只读不写且按 CRC 截断残缺尾部，因此在快照存在、恢复期被反复强杀、事务未提交等组合下都能重复恢复到同一已提交状态；未提交修改整体丢弃，符合崩溃模型。"
+  },
+  {
+   "id": "e11",
+   "source": "tool",
+   "question": "压缩生成快照后继续写入再强杀，恢复是否能正确叠加快照与 WAL？",
+   "command": "本地临时脚本（未入库）：40,000 行 × 128 维写入并更新/删除后正常重启触发压缩；随后再写 40,000 行并更新/删除，直接 kill -9；重启核对",
+   "result": "压缩后 snapshot.dat 21MiB、wal.log 收缩为 16MiB；重启后 id=5 为压缩前的 SNAP、id=6 已删除；再写入阶段在强杀后保留：id=7 为 WAL、id=8 已删除、id=39999 与 id=79999 均存在；按 s='WAL' 过滤的 TopK 返回 [7]。",
+   "interpretation": "恢复顺序为“先快照、后 WAL 重放”，绝对记录使重放幂等；因此快照与 WAL 两个来源叠加后状态一致。"
+  },
+  {
+   "id": "e12",
+   "source": "tool",
+   "question": "查询热路径优化是否带来可测收益，且不影响正确性/召回/持久性？",
+   "command": "python3 minivectordb/tools/bench.py（官方形状 10k×128、1000 次 TopK）；同会话 A/B：基线二进制 e4cfce9a4 与优化二进制 347894135 各 5 轮交替",
+   "result": "A/B 查询中位 909.44ms→589.73ms（−35.2%）；写入中位 2290→2331ms（噪声内持平）；块 I/O 均 5,971,968 bytes；峰值 RSS 12,056→11,884kB；Recall@10 均 1.0，正确性与重启持久性均通过。微基准定位未过滤 TopK 为内存带宽受限：扁平扫描缓存使未过滤 TopK 0.984→0.692ms。",
+   "interpretation": "收益主要来自把红黑树逐节点遍历改为扁平有序数组顺序扫描（v2），辅以定长行布局/平方距离/4 累加器 SIMD（v1）与热路径直取偏移（v3）。写入受 fdatasync 支配、I/O 由数据量决定，故未变。跨时段单独跑分被宿主噪声混淆，因此采用同会话 A/B 作为权威对比。详见 minivectordb/PERFORMANCE.md。"
+  },
+  {
+   "id": "e13",
+   "source": "tool",
+   "question": "过滤查询优化的真实收益是多少？先前 A/B 结论是否被测量方法偏差放大？",
+   "command": "逐轮交替配对 A/B：v0 与 v5 各跑 6 轮单轮基准（v0→v5→v0→v5…），中位数比较；另用微基准分离查询类型",
+   "result": "配对结果 v0 查询中位 634.4ms、v5 500.4ms（−21.1%），单配对波动 466.6–766.9ms；微基准过滤后 TopK 0.402→0.211ms、过滤扫描 0.281→0.255ms。此前『先跑基线 5 轮再跑优化 5 轮』得到 −35.2%，改为交替配对后修正为 −21.1%。",
+   "interpretation": "过滤列缓存（v5）消除了行式布局的页粒度放大：过滤阶段只读紧凑标量数组，仅命中行读向量。顺序 A/B 会把机器预热/漂移计入优化收益，逐轮交替配对消除了该偏差，因此以 −21.1% 为准。"
+  },
+  {
+   "id": "e14",
+   "source": "tool",
+   "question": "过滤列缓存整数化（v6）是否有额外收益？",
+   "command": "同会话微基准（过滤 TopK）；交替配对 A/B v0/v6 与 v5/v6 各 6 轮",
+   "result": "微基准过滤 TopK 0.211→0.170ms；v0 vs v6 交替配对 766.2→614.1ms（−19.9%）；v5 vs v6 配对中位 552.2 vs 591.7ms（差异落在单轮 ±20% 噪声内）。",
+   "interpretation": "整数 intern 去掉了每行字符串比较，微基准可测；但整负载由未过滤查询与协议开销支配，配对 A/B 无法分辨 v5/v6 的真实差异，因此不声称整负载提升。缓存随 scan 重建失效、事务内回退通用路径，正确性经差分/崩溃/场景测试覆盖。"
+  },
+  {
+   "id": "e15",
+   "source": "tool",
+   "question": "按题面逐条自测能否覆盖正式要求的类型边界、语义、事务、恢复与协议变体？",
+   "command": "python3 minivectordb/tools/spec_suite.py",
+   "result": "套件后扩展至 229 项检查，全部通过：BIGINT 边界/溢出、VARCHAR 码点长度与 emoji、码点序比较、float32 舍入、NaN/Inf/维度/溢出拒绝与整句原子性、多列/无 WHERE 更新删除、排序并列按主键、过滤后 TopK、距离表达式排序、ann 与 exact 等价及重启、事务读己之写（含向量）、失败语句保留先前修改、回滚恢复内容与向量、正常关闭/强杀/恢复期重复强杀、NULL/JOIN/聚合/子查询/OR/!=/ALTER/外键/嵌套事务等不支持语句报错、CRLF/BOM/分号/一行多语句/空行协议变体。",
+   "interpretation": "公开题包只有 20 个样例且行数普遍 ≤K；该套件补齐了边界与失败路径，并已用它发现并修正 ORDER BY L2_DISTANCE(...) 表达式未支持的问题。仍无法覆盖组织方驱动的确切通信协议（公开题包不含驱动），需平台预检/日志确认。"
+  },
+  {
+   "id": "e16",
+   "source": "tool",
+   "question": "更刁钻的对抗与崩溃窗口能否暴露语义/恢复缺陷？",
+   "command": "python3 minivectordb/tools/spec_suite.py；python3 minivectordb/tools/stress_recovery.py（40k×128 关闭压缩期间随机 0-200ms 强杀 ×3、恢复期连杀 ×10、每次提交后强杀 ×12）",
+   "result": "229 项自测全过：嵌套 WHERE 括号、超长字面量比较、无 AS 别名、别名遮蔽、主键范围过滤 TopK、1024 维、float32 边界、512/513 字符与码点边界、Unicode 排序对拍、空串、码点序更新、无索引 ann、多表索引重启、事务内失败更新后可继续提交、边界并列、UTF-8 BOM/CRLF/分号/一行多语句、# 注释。压力脚本 0 失败：压缩窗口任意时刻强杀后行数/首尾/过滤计数/TopK 均正确；恢复期连杀 10 次仍可恢复；每次提交后强杀共 12 次，已确认提交逐次保留。",
+   "interpretation": "本轮据此修复/补齐：WHERE 支持括号；比较字面量不再受 VARCHAR 列长限制（仅存储时校验）；SELECT 支持无 AS 别名；支持 # 注释行；CREATE TABLE IF NOT EXISTS 幂等。崩溃窗口测试覆盖了快照 rename 与 WAL 截断/重建的各个阶段。"
+  },
+  {
+   "id": "e17",
+   "source": "tool",
+   "question": "平台反馈“JSON response timeout（未及时收到 JSON 响应）×1”，根因是什么？",
+   "command": "分析本地实现后编写 tools/hostile_driver.py（恶意输入必须逐行回一条 JSON）与 tools/stress_recovery.py；用 strace 思路复现",
+   "result": "定位到两条会导致“永不回包”的路径：① 为支持跨行语句而做的引号/括号配平缓冲，遇到单行内未闭合引号或括号时一直等待后续输入；② SQL 注释中的撇号被当成字符串起始（例如 `SELECT id FROM t -- don't`、未闭合引号的 INSERT），使语句被误判为未完成。修复：语句按行独立处理并在 300ms 空闲后强制回错误、SQL 注释（--/#//* */）在词法与配平阶段被忽略、任何输入行必定回一条 JSON。另补：若驱动在 `--mode` 指令后等待响应，则在驱动空闲 1.2s 后回一条 {}（流水线驱动不会收到多余响应）；并用快速浮点解析把单条 2 万行 INSERT 的响应时间从 1.44s 降到 0.88s。",
+   "interpretation": "平台提示“未及时收到 JSON 响应，请检查换行、flush 和程序阻塞”与上述两条路径一致：程序不是崩溃而是等不到输入、因而没有回包。hostile_driver.py 覆盖 20 余种恶意输入，全部逐行回包且流不错位，可作为该类故障的回归防线。"
+  },
+  {
+   "id": "e18",
+   "source": "tool",
+   "question": "上一轮修复后平台仍报单一用例 JSON response timeout，真正的根因是什么？",
+   "command": "python3 tools/bigdata_check.py --rows 3000000（新增）；python3 tools/hostile_driver.py（新增匀速 pipelining 回归）；全量回归 + stress_recovery 全量",
+   "result": "两个根因：① 协议层——公开题包 README 写明『每个非空行是一条完整 SQL 或驱动指令』『驱动指令不占断言位置』。此前的跨行配平缓冲在驱动匀速发送时可能永不触发空闲 flush（整条语句无响应），而空闲 ack 会注入驱动不期待的多余 JSON。改为按行立即处理、指令零回包、无语句行回 syntax_error。② 资源层——题面 2.3 要求处理超过内存限额的数据；旧执行器对全表 SELECT 物化全部 OutVal 并拼整表 JSON、UPDATE 先收集全部行体，大数据用例 OOM 被杀，驱动侧即表现为等不到 JSON。改为流式输出/轻量引用排序/流式 WAL 批量改删。3M 行×128 维（约 1.66GiB）实测：装载 204.9s，全表扫描 10.2s，全排序 15.7s，批量 UPDATE 1M 行 16.7s，--restart+恢复 5.8s，最终 RssAnon 245MiB（RssFile 1624MiB 为可回收页缓存）。官方形状 benchmark 查询中位 503.9ms，与 v5 的 500.4ms 持平，Recall@10=1.0。",
+   "interpretation": "单一用例超时与『资源用例数据超内存→进程被杀→驱动等不到响应』以及『缓冲/多余回包导致流错位』两类机制吻合。上一轮的空闲 ack 是基于猜测的防御，被题包 README 的明确约定否定——以权威协议文档为准、删除猜测性代码，是本轮最重要的纠正。匿名内存（而非 VmHWM）才是 OOM 风险的正确度量：行体位于文件页缓存，可被内核回收。"
+  }
+ ],
+ "retrospective": "本轮工作由 Agent 主导完成：先按公开题包反推协议，再实现存储/事务/查询，最后用公开用例、崩溃/压缩/内存测试与独立模型差分测试逐步加固。过程中确实暴露并修复了两类问题：TopK 路径的逐行分配瓶颈（2.51s→0.58s），以及大表 TopK 堆比较器方向错误（公开用例因行数≤K 无法发现）。仍然存在的取舍是 ANN 用精确扫描实现：召回率恒为 1.0，但查询成本随行数线性增长；主键到行偏移的常驻映射换取了随机访问速度，行数极大时映射自身会成为内存下限。",
+ "limitations": [
+  "学生在本次材料窗口内只给出了任务指令，没有留下独立的技术解释、预测、反例或对 Agent 结论的质疑，因此不能把 Agent 的规划与实现计入学生学习证据。",
+  "未实现真正的近似索引；ann 模式当前返回精确结果。",
+  "未实现 NULL、JOIN、聚合、子查询、ALTER TABLE、外键、嵌套事务与主键更新，均返回 unsupported_sql。"
+ ]
 }

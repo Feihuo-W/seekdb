@@ -1,7 +1,6 @@
 #include <unistd.h>
 
 #include <cerrno>
-#include <chrono>
 #include <sys/select.h>
 #include <sys/time.h>
 
@@ -17,6 +16,7 @@
 #include <vector>
 
 #include "engine.h"
+#include "json.h"
 
 namespace {
 
@@ -90,55 +90,6 @@ void SplitStatements(const std::string& line, std::vector<std::string>* out) {
   }
   std::string stmt = Trim(cur);
   if (!stmt.empty()) out->push_back(std::move(stmt));
-}
-
-int Balance(const std::string& s) {
-  char quote = 0;
-  bool in_tick = false;
-  int depth = 0;
-  for (size_t i = 0; i < s.size(); ++i) {
-    char c = s[i];
-    if (quote != 0) {
-      if (c == '\\' && i + 1 < s.size()) {
-        ++i;
-      } else if (c == quote) {
-        if (i + 1 < s.size() && s[i + 1] == quote) {
-          ++i;
-        } else {
-          quote = 0;
-        }
-      }
-      continue;
-    }
-    if (in_tick) {
-      if (c == '`') in_tick = false;
-      continue;
-    }
-    if (c == '-' && i + 1 < s.size() && s[i + 1] == '-') {
-      while (i < s.size() && s[i] != '\n') ++i;
-      continue;
-    }
-    if (c == '#') {
-      while (i < s.size() && s[i] != '\n') ++i;
-      continue;
-    }
-    if (c == '/' && i + 1 < s.size() && s[i + 1] == '*') {
-      i += 2;
-      while (i + 1 < s.size() && !(s[i] == '*' && s[i + 1] == '/')) ++i;
-      ++i;
-      continue;
-    }
-    if (c == '\'' || c == '"') {
-      quote = c;
-    } else if (c == '`') {
-      in_tick = true;
-    } else if (c == '(') {
-      ++depth;
-    } else if (c == ')') {
-      if (--depth < 0) return -1;
-    }
-  }
-  return (quote != 0 || in_tick || depth > 0) ? 1 : 0;
 }
 
 // Escapes a statement for single-line stderr diagnostics.
@@ -215,17 +166,6 @@ class LineReader {
 };
 
 
-// Delay before answering a driver directive that expects a response. The answer
-// is only emitted when the driver stays idle, so pipelining drivers are not
-// disturbed.
-int DirectiveAckDelayMs() {
-  static const int v = []() {
-    const char* e = std::getenv("MINIVECTORDB_ACK_MS");
-    return e ? std::atoi(e) : 1200;
-  }();
-  return v;
-}
-
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -256,57 +196,74 @@ int main(int argc, char** argv) {
   std::fflush(stderr);
 
   const bool trace_all = std::getenv("MVDB_TRACE") != nullptr;
-  auto run_stmt = [&](const std::string& s) {
-    std::string out = engine.Execute(s);
-    if (trace_all || out.rfind("{\"error\"", 0) == 0) {
-      std::fprintf(stderr, "stmt input=<%s> resp=<%s>\n", LogEscape(s).c_str(),
-                   LogEscape(out, 200).c_str());
-      std::fflush(stderr);
+  // Query results are streamed through this buffer so a result larger than RAM
+  // never has to be materialized as one string.
+  std::string obuf;
+  obuf.reserve(1 << 16);
+  auto sink = [&](const char* p, size_t n) {
+    obuf.append(p, n);
+    if (obuf.size() >= (1 << 16)) {
+      std::cout.write(obuf.data(), static_cast<std::streamsize>(obuf.size()));
+      obuf.clear();
     }
-    std::cout << out << '\n';
+  };
+  auto finish = [&]() {
+    if (!obuf.empty()) {
+      std::cout.write(obuf.data(), static_cast<std::streamsize>(obuf.size()));
+      obuf.clear();
+    }
+    std::cout.put('\n');
     std::cout.flush();
+  };
+  auto emit = [&](const std::string& out) {
+    sink(out.data(), out.size());
+    finish();
+  };
+  auto run_stmt = [&](const std::string& s) {
+    std::string out = engine.Execute(s, sink);
+    if (!out.empty()) {
+      if (trace_all || out.rfind("{\"error\"", 0) == 0) {
+        std::fprintf(stderr, "stmt input=<%s> resp=<%s>\n", LogEscape(s).c_str(),
+                     LogEscape(out, 200).c_str());
+        std::fflush(stderr);
+      }
+      emit(out);
+    } else {
+      if (trace_all) {
+        std::fprintf(stderr, "stmt input=<%s> resp=<streamed>\n", LogEscape(s).c_str());
+        std::fflush(stderr);
+      }
+      finish();
+    }
+  };
+  auto run_stmts = [&](const std::string& text) {
+    std::vector<std::string> stmts;
+    SplitStatements(text, &stmts);
+    if (stmts.empty()) {
+      // A line that carries no statement (e.g. ";" or a lone comment) still
+      // gets exactly one answer so the driver never waits forever.
+      std::string out = vdb::JsonError("syntax_error");
+      if (trace_all) {
+        std::fprintf(stderr, "stmt input=<%s> resp=<%s>\n", LogEscape(text).c_str(),
+                     out.c_str());
+        std::fflush(stderr);
+      }
+      emit(out);
+      return;
+    }
+    for (const auto& s : stmts) run_stmt(s);
   };
 
   std::string line;
-  std::string pending;
-  bool stop = false;
   bool first_line = true;
   LineReader reader(STDIN_FILENO);
-  auto flush_pending = [&]() {
-    if (pending.empty()) return;
-    std::vector<std::string> stmts;
-    SplitStatements(pending, &stmts);
-    pending.clear();
-    for (const auto& s : stmts) run_stmt(s);
-  };
-  auto ack_deadline = std::chrono::steady_clock::time_point::max();
-  while (!stop) {
-    // When a statement is pending, wait only briefly for a continuation line so
-    // that an unterminated statement still produces an answer instead of a hang.
-    int timeout = -1;
-    if (!pending.empty()) {
-      timeout = 300;
-    } else if (ack_deadline != std::chrono::steady_clock::time_point::max()) {
-      auto now = std::chrono::steady_clock::now();
-      if (now >= ack_deadline) {
-        ack_deadline = std::chrono::steady_clock::time_point::max();
-        std::cout << "{}\n";
-        std::cout.flush();
-        std::fprintf(stderr, "directive ack emitted\n");
-        std::fflush(stderr);
-        continue;
-      }
-      timeout = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    ack_deadline - now).count());
-      if (timeout < 0) timeout = 0;
-    }
-    int st = reader.ReadLine(&line, timeout);
+  // The driver protocol delivers one complete SQL statement (or directive) per
+  // line, so every line is answered immediately. There is deliberately no
+  // cross-line buffering: waiting for a continuation that never arrives is
+  // exactly what produces a "JSON response timeout".
+  for (;;) {
+    int st = reader.ReadLine(&line, -1);
     if (st < 0) break;
-    if (st == 0) {
-      if (!pending.empty()) flush_pending();
-      continue;
-    }
-    ack_deadline = std::chrono::steady_clock::time_point::max();
     if (first_line) {
       first_line = false;
       if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF &&
@@ -317,41 +274,31 @@ int main(int argc, char** argv) {
     }
     std::string stmt = Trim(line);
     if (stmt.empty()) continue;
-    if (pending.empty() && stmt[0] == '#') continue;
-    if (pending.empty() && stmt.rfind("--", 0) == 0) {
+    if (stmt[0] == '#') continue;
+    if (stmt.rfind("--", 0) == 0) {
       std::string rest = Lower(Trim(stmt.substr(2)));
       while (!rest.empty() && rest.back() == ';') rest = Trim(rest.substr(0, rest.size() - 1));
-      if (rest == "restart") {
+      std::string word = rest.substr(0, rest.find_first_of(" \t"));
+      if (word == "restart") {
         std::fprintf(stderr, "directive restart\n");
         std::fflush(stderr);
         break;
       }
-      if (rest.rfind("mode", 0) == 0) {
+      if (word == "mode") {
         std::string mode = Trim(rest.substr(4));
         if (!mode.empty() && mode[0] == '=') mode = Trim(mode.substr(1));
+        mode = mode.substr(0, mode.find_first_of(" \t"));
         engine.SetAnnMode(mode == "ann");
         std::fprintf(stderr, "directive mode %s\n", mode.c_str());
         std::fflush(stderr);
-        ack_deadline = DirectiveAckDelayMs() > 0
-                           ? std::chrono::steady_clock::now() +
-                                 std::chrono::milliseconds(DirectiveAckDelayMs())
-                           : std::chrono::steady_clock::time_point::max();
         continue;
       }
       continue;
     }
     std::string low = Lower(stmt);
-    if (pending.empty() && (low == "quit" || low == "exit")) break;
-
-    pending += pending.empty() ? stmt : " " + stmt;
-    if (Balance(pending) == 1) continue;
-
-    std::vector<std::string> stmts;
-    SplitStatements(pending, &stmts);
-    pending.clear();
-    for (const auto& s : stmts) run_stmt(s);
+    if (low == "quit" || low == "exit") break;
+    run_stmts(stmt);
   }
-  flush_pending();
 
   engine.Shutdown();
   g_engine = nullptr;

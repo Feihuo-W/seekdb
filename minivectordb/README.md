@@ -27,7 +27,8 @@ docker run --rm -i -v minivectordb-data:/data --cpus=2 --memory=2g minivectordb
 ## 输入输出协议
 
 每一行输入是一条完整 SQL（末尾分号可有可无；一行多条以 `;` 分隔时逐条执行）。
-每条 SQL 输出一行紧凑 JSON：
+程序按行立即处理并回包，不做跨行缓冲；无法解析的行（含空语句 `;`、纯注释行）
+也回一条错误 JSON，保证驱动不会等不到响应。每条 SQL 输出一行紧凑 JSON：
 
 | 语句 | 输出 |
 | --- | --- |
@@ -75,16 +76,21 @@ BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
 - 记录布局（`/data/wal.log`、`/data/snapshot.dat`）：自描述记录
   `magic|len|crc32|type|txn` + payload；PUT 记录携带表 id、主键和整行编码
   （BIGINT 8B、VARCHAR 长度前缀、VECTOR 512/4B×dim）。文件以 mmap 访问，主键到偏移的
-  映射常驻内存（约 40B/行），行数据按需读取，扫描不整表载入内存。
+  映射常驻内存（约 90B/行），行数据按需读取，扫描不整表载入内存。
+- 超出内存的数据：查询结果逐行流式输出（不在内存拼整表 JSON）；排序只保存
+  主键+距离+行视图的轻量引用，`ORDER BY ... LIMIT` 用有界堆；自动提交的批量
+  UPDATE/DELETE 直接把新行版本/墓碑流式写入 WAL 事务，内存只留主键列表。
+  行体始终位于文件页缓存（可被内核回收），匿名内存仅为索引与少量缓冲。
 - 事务：单显式事务；修改先写入内存 overlay（读己之写），COMMIT 时连续追加
   BEGIN/记录/COMMIT 并 `fdatasync`，成功后才对外返回；ROLLBACK 与语句失败只丢弃
   overlay。自动提交等价于单语句事务。
 - 恢复：启动时先加载 snapshot，再顺序重放 WAL，仅应用带 COMMIT 的事务；遇到
   CRC/长度不完整的尾部记录即截断逻辑末端，因此恢复途中再次被杀可重复恢复。
   读取阶段不写文件，恢复幂等。
-- 压缩：WAL 超过 128 MiB 或正常关闭且超过 16 MiB 时，把当前可见行重写为
+- 压缩：WAL 超过 256 MiB（含正常关闭时）把当前可见行流式重写为
   `snapshot.tmp`，`fsync` 后原子 `rename`，再截断并收缩 WAL 文件（回到 16 MiB 空白
-  映射）；崩溃发生在任一窗口都可由“快照 + 完整 WAL 重放”得到一致状态。
+  映射）；重写期间不复制整表主键索引。崩溃发生在任一窗口都可由“快照 + 完整 WAL
+  重放”得到一致状态。
 - 向量检索：精确扫描 + AVX2/FMA 距离计算；TopK 先用 float32 距离保留 `K + max(3K,64)`
   个候选，再用 double 复核距离、按主键打破并列并截断到 K。`ann` 模式当前同样返回精确
   结果（Recall@K=1.0）。索引创建信息随 schema 持久化，增删改始终作用于当前可见记录。
@@ -109,4 +115,5 @@ python3 minivectordb/tools/scenario_checks.py --scale-rows 500000 --scale-dim 64
 python3 minivectordb/tools/spec_suite.py   # 按题面逐条自测（229 项：类型/语义/事务/恢复/协议/对抗）
 python3 minivectordb/tools/stress_recovery.py  # 压缩窗口强杀、恢复期连杀、提交后强杀压力
 python3 minivectordb/tools/hostile_driver.py # 恶意输入：每行输入必须回一条 JSON，不得挂死
+python3 minivectordb/tools/bigdata_check.py --rows 3000000  # 超内存数据：全表扫描/排序/批量改删/重启，监控匿名 RSS
 ```
