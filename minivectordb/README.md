@@ -21,26 +21,33 @@ docker run --rm -i -v minivectordb-data:/data --cpus=2 --memory=2g minivectordb
 
 - 语言：C++17，无第三方运行时依赖；`Dockerfile` 在镜像内从源码构建。
 - 数据目录：`/data`（可用 `--data <dir>` 或 `MINIVECTORDB_DATA` 覆盖）。
-- 日志与就绪信息只写 stderr；stdout 只输出评测结果。
-- 正常关闭：stdin EOF、`--restart` 指令或 SIGTERM/SIGINT，均丢弃未提交事务。
+- 日志只写 stderr；stdout 只输出协议报文（含启动握手 `{"type":"ready"}`）。
+- 正常关闭：`shutdown` 请求、stdin EOF 或 SIGTERM/SIGINT，均回滚未提交事务并落盘；
+  `shutdown` 响应后以退出码 0 结束，stdout 不再输出任何内容。
 
-## 输入输出协议
+## 输入输出协议（STDIO_PROTOCOL.md）
 
-每一行输入是一条完整 SQL（末尾分号可有可无；一行多条以 `;` 分隔时逐条执行）。
-程序按行立即处理并回包，不做跨行缓冲；无法解析的行（含空语句 `;`、纯注释行）
-也回一条错误 JSON，保证驱动不会等不到响应。每条 SQL 输出一行紧凑 JSON：
+遵循题包根目录 `STDIO_PROTOCOL.md` 的 JSON Lines 协议：
 
-| 语句 | 输出 |
+- 启动完成恢复后、读取第一条请求前，主动向 stdout 输出恰好一行 `{"type":"ready"}`
+  并 flush；每次启动（含恢复重启）都输出一次。
+- 每行请求是一个 JSON 对象：`{"id":1,"op":"execute","sql":"...","search_mode":"exact"}`。
+  每个请求恰好回一行响应，原样回传 `id`（保持 JSON 类型），`ok` 为布尔值：
+
+| 语句 | 响应 |
 | --- | --- |
-| 查询 | `{"columns":[...],"rows":[[...],...]}` |
-| INSERT/UPDATE/DELETE | `{"affected_rows":N}` |
-| CREATE TABLE / CREATE VECTOR INDEX / BEGIN / COMMIT / ROLLBACK | `{}` |
-| 失败 | `{"error":"<code>"}` |
+| 查询 | `{"id":1,"ok":true,"columns":[...],"rows":[[...],...]}` |
+| INSERT/UPDATE/DELETE | `{"id":2,"ok":true,"affected_rows":N}` |
+| CREATE TABLE / CREATE VECTOR INDEX / BEGIN / COMMIT / ROLLBACK | `{"id":3,"ok":true}` |
+| 失败 | `{"id":4,"ok":false,"error":{"code":"<code>","message":"..."}}` |
+| `{"id":5,"op":"shutdown"}` | `{"id":5,"ok":true}`，随后退出码 0 |
 
-驱动指令行以 `--` 开头、不产生输出：
-
-- `--restart`：回滚未提交事务并退出，由驱动用同一数据目录重新启动；
-- `--mode exact|ann`：切换向量检索模式（`ann` 当前以精确扫描实现，召回率 1.0）。
+- `sql` 字段是完整单条语句（尾部分号被接受）；不切割通信输入，字符串内的分号安全。
+  请求解析容忍空白，支持 `\uXXXX` 转义（含代理对）；BIGINT 以 JSON 整数输出，不经浮点。
+- `search_mode` 逐请求生效：`exact` 精确检索；`ann` 当前以精确扫描实现（召回率 1.0）。
+- 预期 SQL 错误只回失败响应，进程继续服务；查询结果流式输出，单响应不整表物化。
+- 兼容回退：非 `{` 开头的行按裸 SQL 处理（本地自测工具用），`--restart`/`--mode`
+  指令与 `quit` 仍可用；正式判题只使用上面的 JSONL 路径。
 
 错误码：`syntax_error`、`unsupported_sql`、`duplicate_key`、`dimension_mismatch`、
 `invalid_vector`、`value_out_of_range`、`value_too_long`、`type_mismatch`、
@@ -109,13 +116,18 @@ BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
 ## 本地自测
 
 ```bash
+# 官方协议自测（题包 protocol_check；本地直跑无需 Docker，正式提交前建议再测镜像）
+python3 protocol_check/run.py --command '["./minivectordb/build/minivectordb","--data","{data_dir}"]' --handshake-only --output /tmp/proto-hs
+python3 protocol_check/run.py --command '["./minivectordb/build/minivectordb","--data","{data_dir}"]' --output /tmp/proto-public
+
 python3 minivectordb/tools/run_cases.py            # 运行 mysqltest 公开样例
 python3 minivectordb/tools/run_cases.py --filter vector
 python3 minivectordb/tools/fuzz_diff.py --seeds 10 --steps 200   # 与独立参考模型对拍
 python3 minivectordb/tools/fuzz_diff.py --crash --seeds 10 --steps 200  # 随机强杀（含恢复期）
 python3 minivectordb/tools/scenario_checks.py    # 多表事务/原子性/引号/ANN/崩溃回滚
 python3 minivectordb/tools/scenario_checks.py --scale-rows 500000 --scale-dim 64  # 压缩与恢复
-python3 minivectordb/tools/spec_suite.py   # 按题面逐条自测（229 项：类型/语义/事务/恢复/协议/对抗）
+python3 minivectordb/tools/spec_suite.py           # 按题面逐条自测（229 项，裸 SQL 路径）
+python3 minivectordb/tools/spec_suite.py --jsonl   # 同上 + JSONL 协议检查（241 项：id 回传/布尔 ok/转义/shutdown）
 python3 minivectordb/tools/stress_recovery.py  # 增量压缩会话内强杀、关闭/恢复期连杀、提交后强杀压力
 python3 minivectordb/tools/bigdata_check.py --rows 3000000 --dim 128  # 超内存数据：扫描/排序/批量改删/重启，监控匿名 RSS 与单响应延迟
 python3 minivectordb/tools/hostile_driver.py # 恶意输入：每行输入必须回一条 JSON，不得挂死

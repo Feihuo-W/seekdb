@@ -12,7 +12,8 @@
    "minivectordb/tools/run_cases.py",
    "minivectordb/README.md",
    "Dockerfile",
-   "conversation.json"
+   "conversation.json",
+   "agent/conversation.json"
   ]
  },
  "attribution": "本文件按来源区分内容：user_prompts 是学生本人在本次会话中的原始输入（原文）；conversations 是 Agent 的执行说明；experiments 是 Agent 在本机运行的真实命令与截取输出。没有学生本人独立提出的技术解释、预测或反例，因此本材料不声称存在对应的学生理解证据。",
@@ -44,6 +45,11 @@
    "id": "u6",
    "content": "正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞）× 1。未执行性能评测。",
    "note": "平台第三次反馈同一准入失败（单一用例 JSON 响应超时）。学生要求彻底定位真正的阻塞点并一次性通过。"
+  },
+  {
+   "id": "u7",
+   "content": "请你检查一下远程官方分支有无内容更新，并给我最有可能通过的一个提测版本",
+   "note": "学生再次粘贴加赛赛题一完整题面（含 §3.1 通信协议以题包为准、§4.4 评测入口默认读取 agent/conversation.json、每日最多 2 次正式提交、Commit SHA 选填但须完整），要求核对官方分支更新并给出最可能一次性通过正确性门槛的提测版本。"
   }
  ],
  "conversations": [
@@ -71,6 +77,11 @@
    "id": "c5",
    "source": "agent",
    "content": "前两轮已排除解析器死循环（Fail 抛异常、循环必前进）、协议缓冲（v9 已按行立即回包）、ready 标记与管道死锁。本轮给测试驱动加了逐响应计时，在 1M 行装载中实测到一条 500 行 INSERT 阻塞 3.276s：WAL 越过 256MiB 阈值后，Compact() 在提交响应路径上同步重写约 530MB 快照；3M 行规模旧路径一次重写 1.58GiB，在平台 2 核配额/内存上限/慢盘下可达十几秒，恰好命中题面强制的超内存用例，驱动等待单条 JSON 超时。修复为增量压缩：会话从完整事务边界（水位=当时 WAL 长度）开始，每条语句只做 ≤50ms/≤64MB 的快照重写（snapshot.tmp）并增量复制水位后的 WAL 尾巴（wal.tmp），每 4MB flush 后 sync_file_range(SYNC_FILE_RANGE_WRITE) 踢出异步写回避免最终 fsync 长阻塞；完成时有序归并重定位未变行引用、重基 WAL 偏移后原子换名。崩溃不变量：PUT/DEL 是按主键的绝对操作，『新快照+重放水位后全部已提交事务』精确收敛，三个崩溃窗口（旧快照+全 WAL / 新快照+全 WAL / 新快照+WAL 尾）均恢复一致；Init 清理残留 tmp，正常关闭丢弃会话。实测 1M 行最慢单响应 3.276→0.290s，3M 行最慢 1.177s，压缩收尾 fsync 18–46ms。另发现题面 4.4 默认读 agent/conversation.json 而材料只在仓库根目录，已同步补齐。全量回归（公开 20、规范 229、对抗、fuzz、崩溃、场景、1M/3M 大数据、含增量压缩窗口内 kill 的压力 216 项）0 失败，官方形状查询中位 393ms 无回退。"
+  },
+  {
+   "id": "c6",
+   "source": "agent",
+   "content": "拉取官方 origin 发现新提交 f4d4e2665（11-10 11:30『upload stdin/stdout protocol and one demo py to double check』）：题包首次公布正式判题协议 STDIO_PROTOCOL.md 与官方自测驱动 protocol_check/，mysqltest README 同步声明裸 SQL、文本 READY、文本表格均不符合正式协议。逐条核对确认 v10 与官方协议存在根本差异：就绪握手只写 stderr（官方要求恢复完成后 stdout 第一行恰好 {\"type\":\"ready\"} 并 flush）；输入是裸 SQL 行（官方要求 JSONL 请求 {id,op,sql,search_mode}）；响应无 id/ok 信封（官方要求回传同类型 id 与布尔 ok，错误为 {code,message} 对象）；关闭靠 --restart/EOF（官方要求 shutdown op 响应 ok:true 后退出码 0 且 stdout 静默）。规范第 2 节明确『只向 stderr 输出 ready……判题器可能报 JSON response timeout』，与平台三次反馈逐字吻合——这才是准入失败的根因，v10 修复的压缩停顿是叠加问题。改造：main.cpp 新增严格 JSON 请求解析（\\uXXXX 含代理对、id 按原始 JSON 令牌回传保持类型、容忍冒号后空白）、stdout 握手、execute/shutdown 分发；引擎载荷改为 ok:true / ok:false+error{code,message}，id 拼接进首个输出块（流式输出同样适用），每请求按 search_mode 切换模式；SQL 解析器 ExpectEnd 接受一个尾随分号（JSONL 的 sql 字段自带分号）；保留非 { 开头行的裸 SQL 回退路径供本地工具。官方驱动首轮实测抓到真实 bug：json.dumps 默认格式冒号后带空格，解析器未跳空白导致 shutdown 被判 invalid_request，紧凑 JSON 手动测试无法暴露；修复后握手 PASS。全部本地工具同步适配（跳过 ready 行、归一化信封），spec_suite 新增 --jsonl 双模式与 12 项协议边界检查。"
   }
  ],
  "experiments": [
@@ -233,9 +244,25 @@
    "command": "python3 tools/bigdata_check.py --rows 1000000 / --rows 3000000；python3 tools/stress_recovery.py（新增 incremental_compaction_window：会话进行中 kill、恢复中再 kill、交错显式事务）；python3 tools/bench.py ×3；全量回归",
    "result": "1M 行最慢单响应 3.276→0.290s，3M 行最慢 1.177s（装载 170.2s，17.6k 行/s）；压缩收尾 sync 18–46ms、swap 25–750ms、relocate 120–548ms；3M 行 RssAnon 245MiB。压力 216 项 ok / 0 failures（含事务提交存活、回滚缺席、三窗口恢复）。bench 3 轮中位 T_query 393.0ms、T_write 1607.5ms、Recall@10=1.0、重启持久 true。公开 20/20、规范 229/229、对抗/fuzz/崩溃/场景全绿。",
    "interpretation": "停顿根因消除且崩溃不变量成立（绝对 PUT/DEL + 水位后重放收敛）。代价是装载吞吐 27.3k→21.2k 行/s（压缩分摊占用语句预算），换取任何单响应有界；官方形状查询无回退。材料路径补齐 agent/conversation.json 符合题面 4.4 默认读取位置。"
+  },
+  {
+   "id": "e21",
+   "source": "tool",
+   "question": "官方 protocol_check 驱动下，实现是否满足正式 JSONL 协议（握手/响应信封/关闭语义）并通过全部公开用例？",
+   "command": "python3 protocol_check/run.py --command '[\"minivectordb/build/minivectordb\",\"--data\",\"{data_dir}\"]' --handshake-only --output <dir>；同驱动不带 --handshake-only 跑全部公开用例 --output /tmp/proto-public-1",
+   "result": "修复前握手 FAIL（官方带空格 JSON 被判 invalid_request，shutdown failed）；修复后握手 PASS，公开 20/20 用例 PASS（含重启、exact/ann 模式切换、Unicode、BIGINT），result.json passed=true。",
+   "interpretation": "官方判题器口径下协议准入已满足。平台三次『JSON response timeout』的根因（stderr-only ready + 裸 SQL 输入 + 无 id/ok 信封）被官方工具直接复现并消除；本地裸 SQL 自测无法暴露协议层差异，此后以官方 protocol_check 为准入基准。"
+  },
+  {
+   "id": "e22",
+   "source": "tool",
+   "question": "协议改造后全量回归、超内存数据与官方形状性能是否保持？",
+   "command": "python3 tools/spec_suite.py 与 --jsonl；run_cases / hostile_driver / fuzz_diff（5 种子）/ scenario_checks / stress_recovery；bigdata_check --rows 1000000 与 --rows 3000000；bench.py --rounds 3（另复测 3 轮）",
+   "result": "spec 229/229（裸 SQL）、241/241（--jsonl：2^53+1 大整数 id 回传、字符串 id、代理对转义 U+1F600、字符串内分号、带空白请求、畸形请求 invalid_request、未知 op、ann 模式、shutdown 退出码 0 且 stdout 静默）；公开 20/20、hostile 0 失败、fuzz 5/5、scenario 0 失败、stress 216 ok/0 failures。bigdata 1M：装载 36.7s、最慢单响应 0.309s、RssAnon 80MiB；3M/1.66GiB：装载 181.9s、最慢单响应 0.892s、全表扫描 10.0s、全排序 14.5s、批量 UPDATE 5.1s、重启恢复 8.1s、RssAnon 245MiB，均 0 失败。bench 3 轮中位 T_query 467.7ms、T_write 1659.0ms、I/O 5,971,968B、Recall@10=1.0、重启持久 true；复测中位 461.4/1806.3ms。",
+   "interpretation": "协议层只增加常数级信封拼接，查询/写入/恢复路径无结构性回退（查询仍走原流式路径，与 v10 时点 393ms 的差异在本机不同时段波动范围内，六轮 445–557ms）。双模式自测覆盖官方协议边界；提测版本以官方 protocol_check 握手+公开 20/20 全绿为准入依据。"
   }
  ],
- "retrospective": "本轮工作由 Agent 主导完成：先按公开题包反推协议，再实现存储/事务/查询，最后用公开用例、崩溃/压缩/内存测试与独立模型差分测试逐步加固。过程中确实暴露并修复了两类问题：TopK 路径的逐行分配瓶颈（2.51s→0.58s），以及大表 TopK 堆比较器方向错误（公开用例因行数≤K 无法发现）。仍然存在的取舍是 ANN 用精确扫描实现：召回率恒为 1.0，但查询成本随行数线性增长；主键到行偏移的常驻映射换取了随机访问速度，行数极大时映射自身会成为内存下限。",
+ "retrospective": "本轮工作由 Agent 主导完成：先按公开题包反推协议，再实现存储/事务/查询，最后用公开用例、崩溃/压缩/内存测试与独立模型差分测试逐步加固。过程中确实暴露并修复了两类问题：TopK 路径的逐行分配瓶颈（2.51s→0.58s），以及大表 TopK 堆比较器方向错误（公开用例因行数≤K 无法发现）。仍然存在的取舍是 ANN 用精确扫描实现：召回率恒为 1.0，但查询成本随行数线性增长；主键到行偏移的常驻映射换取了随机访问速度，行数极大时映射自身会成为内存下限。第三轮准入失败的根因最终由官方公布的 STDIO_PROTOCOL 确认：就绪握手与响应信封必须符合判题器口径，本地裸 SQL 自测无法暴露协议层差异；教训是尽早用官方自测工具（protocol_check）作为准入基准，而不是仅凭题面文字反推协议。",
  "limitations": [
   "学生在本次材料窗口内只给出了任务指令，没有留下独立的技术解释、预测、反例或对 Agent 结论的质疑，因此不能把 Agent 的规划与实现计入学生学习证据。",
   "未实现真正的近似索引；ann 模式当前返回精确结果。",

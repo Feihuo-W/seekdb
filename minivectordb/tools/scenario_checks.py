@@ -34,19 +34,27 @@ class Db:
     def read(self, timeout=30.0):
         fd = self.p.stdout.fileno()
         deadline = time.time() + timeout
-        while b"\n" not in self.buf:
-            remain = deadline - time.time()
-            if remain <= 0:
-                raise TimeoutError("no output")
-            r, _, _ = select.select([fd], [], [], remain)
-            if not r:
-                raise TimeoutError("no output")
-            chunk = os.read(fd, 1 << 16)
-            if not chunk:
-                raise EOFError("process exited")
-            self.buf += chunk
-        line, self.buf = self.buf.split(b"\n", 1)
-        return json.loads(line.decode("utf-8"))
+        while True:
+            while b"\n" not in self.buf:
+                remain = deadline - time.time()
+                if remain <= 0:
+                    raise TimeoutError("no output")
+                r, _, _ = select.select([fd], [], [], remain)
+                if not r:
+                    raise TimeoutError("no output")
+                chunk = os.read(fd, 1 << 16)
+                if not chunk:
+                    raise EOFError("process exited")
+                self.buf += chunk
+            line, self.buf = self.buf.split(b"\n", 1)
+            r = json.loads(line.decode("utf-8"))
+            if isinstance(r, dict) and r.get("type") == "ready":
+                continue
+            if isinstance(r, dict) and "ok" in r:
+                if r["ok"] is False:
+                    return {"error": (r.get("error") or {}).get("code", "unknown")}
+                return {k: v for k, v in r.items() if k not in ("ok", "id")}
+            return r
 
     def q(self, sql):
         self.send(sql)

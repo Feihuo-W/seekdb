@@ -1360,7 +1360,7 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     sink(rowbuf.data(), rowbuf.size());
   };
   auto emit_header = [&]() {
-    std::string header = "{\"columns\":[";
+    std::string header = "{\"ok\":true,\"columns\":[";
     std::vector<std::string> cols = out_columns();
     for (size_t i = 0; i < cols.size(); ++i) {
       if (i) header += ',';

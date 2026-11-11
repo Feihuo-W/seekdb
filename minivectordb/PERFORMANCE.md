@@ -36,6 +36,7 @@
 | v8 | `ecfd4e999` | 11-10 11:05 | 快速浮点解析（≤15 位有效数字走精确快路径，其余回落 strtod） | 单条 2 万行 INSERT 响应 1.44s→0.88s；批量写入 0.78s→0.57s |
 | v9 | `227d65b11` | 11-10 12:00 | 超内存数据流式执行 + 按行立即回包协议加固 | 3M 行/1.66GiB 数据匿名 RSS 仅 245MiB；官方形状查询中位 503.9ms（与 v5 持平） |
 | v10 | `fd4263c05` | 11-10 13:30 | 增量压缩：快照重写分摊到每条语句，消除提交路径上的多秒停顿 | 1M 行装载最慢单响应 3.276→0.290s；3M 行最慢 1.177s；查询中位 393.0ms |
+| v11 | （见下） | 11-10 14:30 | 对齐官方 STDIO_PROTOCOL：stdout ready 握手、JSONL 请求解析、id/ok 响应信封、shutdown op | 官方 protocol_check 握手+公开 20/20 PASS；spec 双模 229/241 全绿；T_query 467.7ms、T_write 1659.0ms、I/O 5,971,968B 不变、Recall@10=1.0 |
 
 ## 权威对比：v0 vs v5（逐轮交替配对 A/B，各 6 轮）
 
@@ -210,6 +211,49 @@ scenario（含 50 万行）0 失败；`stress_recovery.py` 新增**增量压缩�
 
 另：题面 §4.4 写明评测入口默认读取 `agent/conversation.json`，本轮已把材料同步
 放置到该路径（根目录副本保留）。
+
+## v11 官方 JSONL 协议对齐（准入修复·第三轮）
+
+检查官方远程分支发现新提交 `f4d4e2665`（11-10 11:30「upload stdin/stdout protocol
+and one demo py to double check」）：题包新增根目录 `STDIO_PROTOCOL.md` 与
+`protocol_check/` 官方自测驱动，**正式判题协议首次完整公布**。逐条核对发现 v10
+实现与官方协议存在根本差异：
+
+| 项 | v10 实现 | 官方要求 |
+| --- | --- | --- |
+| 就绪握手 | 仅 stderr 日志 | stdout 第一行恰好 `{"type":"ready"}`，恢复完成后、读请求前主动输出并 flush |
+| 请求格式 | 裸 SQL 行 | JSONL：`{"id":1,"op":"execute","sql":"...","search_mode":"exact"}` |
+| 响应格式 | `{"columns":...}`/`{"error":"code"}` | 回传同类型 `id` + 布尔 `ok`；错误为 `{"code","message"}` 对象 |
+| 关闭 | `--restart` 指令/EOF | `{"op":"shutdown"}` 请求 → `ok:true` 响应 → 退出码 0，stdout 静默 |
+
+规范第 2 节明确：「程序启动后直接等待 SQL、只向 stderr 输出 ready……判题器可能报
+JSON response timeout」——与平台三次反馈的报错完全吻合。合并官方分支后改造：
+
+1. `main.cpp` 新增请求解析器（容忍空白、`\uXXXX` 含代理对、id 按原始 JSON 令牌
+   回传保持类型），stdout 握手，execute/shutdown 分发；响应信封把 `id` 拼接进
+   引擎 payload（流式输出同样适用），每请求按 `search_mode` 切换模式；
+2. `json.h`/引擎流式头改为 `ok:true`/`ok:false+error{code,message}` 官方载荷；
+3. SQL 解析器 `ExpectEnd` 接受一个尾随分号（JSONL 的 sql 字段自带分号）；
+4. 保留非 `{` 开头行的裸 SQL 回退路径，本地工具链不受影响。
+
+**官方工具实测抓到一个真实 bug**：首轮 `protocol_check --handshake-only` 报
+`shutdown failed`——官方驱动用 `json.dumps` 默认格式（冒号后带空格），而解析器
+在冒号后未跳空白即解析字符串值，紧凑 JSON 手动测试无法暴露。修复后握手 PASS。
+
+验证（本地 `--command` 直跑官方驱动，无需 Docker）：
+
+- `protocol_check` 握手 PASS；**公开 20/20 用例 PASS**（含重启、模式切换、Unicode）。
+- `spec_suite.py` 双模式：裸 SQL 229/229；`--jsonl` 241/241（新增大整数 id 回传
+  2^53+1、字符串 id、代理对转义、字符串内分号、带空白请求、畸形请求、未知 op、
+  shutdown 后退出码 0 且 stdout 静默）。
+- 其余回归：run_cases 20/20、hostile 0 失败、fuzz 5/5、scenario 0 失败、
+  stress（含增量压缩会话内强杀）216 ok/0 失败。bigdata 1M：装载 36.7s、最慢单响应
+  0.309s、RssAnon 80MiB；3M/1.66GiB：装载 181.9s、最慢单响应 0.892s、全表扫描
+  10.0s、全排序 14.5s、批量 UPDATE 5.1s、重启恢复 8.1s、RssAnon 245MiB，均 0 失败。
+- 官方形状 benchmark（3 轮中位）：T_query 467.7ms、T_write 1659.0ms、
+  I/O 5,971,968B 不变、Recall@10=1.0、重启持久 true。复测一轮中位 461.4/1806.3ms；
+  协议改造只增加常数级信封拼接，查询仍走原流式路径，与 v10 时点 393ms 的差异
+  在本机不同时段波动范围内（六轮 445–557ms），无结构性回退。
 
 ## 后续方向（未实施）
 - 列式向量存储（向量连续成块）逼近带宽上限；

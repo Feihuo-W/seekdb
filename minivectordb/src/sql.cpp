@@ -334,6 +334,8 @@ class Parser {
     return Next().inum;
   }
   void ExpectEnd() {
+    // The JSONL protocol delivers the statement with its terminating ';'.
+    if (Peek().kind == Token::Punct && Peek().text == ";") Next();
     if (Peek().kind != Token::End) Fail("syntax_error");
   }
 

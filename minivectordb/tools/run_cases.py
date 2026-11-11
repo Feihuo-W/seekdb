@@ -38,19 +38,23 @@ class Proc:
     def read_line(self, timeout=30.0):
         fd = self.p.stdout.fileno()
         deadline = time.time() + timeout
-        while b"\n" not in self.buf:
-            remain = deadline - time.time()
-            if remain <= 0:
-                raise TimeoutError("timed out waiting for output")
-            r, _, _ = select.select([fd], [], [], remain)
-            if not r:
-                raise TimeoutError("timed out waiting for output")
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                raise EOFError("process exited; stderr:\n" + self.stderr_text())
-            self.buf += chunk
-        line, self.buf = self.buf.split(b"\n", 1)
-        return line.decode("utf-8", "replace")
+        while True:
+            while b"\n" not in self.buf:
+                remain = deadline - time.time()
+                if remain <= 0:
+                    raise TimeoutError("timed out waiting for output")
+                r, _, _ = select.select([fd], [], [], remain)
+                if not r:
+                    raise TimeoutError("timed out waiting for output")
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    raise EOFError("process exited; stderr:\n" + self.stderr_text())
+                self.buf += chunk
+            line, self.buf = self.buf.split(b"\n", 1)
+            text = line.decode("utf-8", "replace")
+            if text.strip() == '{"type":"ready"}':
+                continue
+            return text
 
     def stderr_text(self):
         try:
@@ -213,6 +217,11 @@ def run_case(binary, case_id, test_path, result_path, verbose=False):
             except json.JSONDecodeError:
                 failures.append("step %d: invalid JSON %r for %r" % (step, raw, stmt))
                 break
+            if isinstance(actual, dict) and "ok" in actual:
+                if actual["ok"] is False:
+                    actual = {"error": (actual.get("error") or {}).get("code", "unknown")}
+                else:
+                    actual = {k: v for k, v in actual.items() if k not in ("ok", "id")}
             errs = compare(expected[ei], actual)
             if errs:
                 failures.append("step %d %r: %s" % (step, stmt, "; ".join(errs)))

@@ -116,6 +116,186 @@ std::string LogEscape(const std::string& s, size_t limit = 400) {
   return out;
 }
 
+// ---- JSONL request parsing (STDIO_PROTOCOL.md) ----
+
+void AppendUtf8(std::string* out, uint32_t cp) {
+  if (cp < 0x80) {
+    out->push_back(static_cast<char>(cp));
+  } else if (cp < 0x800) {
+    out->push_back(static_cast<char>(0xC0 | (cp >> 6)));
+    out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else if (cp < 0x10000) {
+    out->push_back(static_cast<char>(0xE0 | (cp >> 12)));
+    out->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  } else {
+    out->push_back(static_cast<char>(0xF0 | (cp >> 18)));
+    out->push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+    out->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+    out->push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+  }
+}
+
+struct JsonReq {
+  const char* p;
+  const char* end;
+
+  void Ws() {
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) ++p;
+  }
+  bool Lit(const char* s) {
+    size_t n = std::strlen(s);
+    if (static_cast<size_t>(end - p) < n || std::memcmp(p, s, n) != 0) return false;
+    p += n;
+    return true;
+  }
+  bool Hex4(uint32_t* v) {
+    if (end - p < 4) return false;
+    uint32_t x = 0;
+    for (int i = 0; i < 4; ++i) {
+      char c = *p++;
+      x <<= 4;
+      if (c >= '0' && c <= '9') x |= static_cast<uint32_t>(c - '0');
+      else if (c >= 'a' && c <= 'f') x |= static_cast<uint32_t>(c - 'a' + 10);
+      else if (c >= 'A' && c <= 'F') x |= static_cast<uint32_t>(c - 'A' + 10);
+      else return false;
+    }
+    *v = x;
+    return true;
+  }
+  bool Str(std::string* out) {
+    if (p >= end || *p != '"') return false;
+    ++p;
+    out->clear();
+    while (p < end) {
+      unsigned char c = static_cast<unsigned char>(*p++);
+      if (c == '"') return true;
+      if (c < 0x20) return false;
+      if (c != '\\') {
+        out->push_back(static_cast<char>(c));
+        continue;
+      }
+      if (p >= end) return false;
+      char e = *p++;
+      switch (e) {
+        case '"': out->push_back('"'); break;
+        case '\\': out->push_back('\\'); break;
+        case '/': out->push_back('/'); break;
+        case 'b': out->push_back('\b'); break;
+        case 'f': out->push_back('\f'); break;
+        case 'n': out->push_back('\n'); break;
+        case 'r': out->push_back('\r'); break;
+        case 't': out->push_back('\t'); break;
+        case 'u': {
+          uint32_t cp = 0;
+          if (!Hex4(&cp)) return false;
+          if (cp >= 0xD800 && cp <= 0xDBFF) {
+            if (end - p < 6 || p[0] != '\\' || p[1] != 'u') return false;
+            p += 2;
+            uint32_t lo = 0;
+            if (!Hex4(&lo) || lo < 0xDC00 || lo > 0xDFFF) return false;
+            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+          } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+            return false;
+          }
+          AppendUtf8(out, cp);
+          break;
+        }
+        default: return false;
+      }
+    }
+    return false;
+  }
+  // Skips any value; when raw != nullptr, captures its exact source text so
+  // the id can be echoed back with its original JSON type.
+  bool Skip(std::string* raw) {
+    Ws();
+    const char* start = p;
+    if (p >= end) return false;
+    char c = *p;
+    if (c == '"') {
+      std::string tmp;
+      if (!Str(&tmp)) return false;
+    } else if (c == '{' || c == '[') {
+      char close = (c == '{') ? '}' : ']';
+      ++p;
+      int depth = 1;
+      while (p < end && depth > 0) {
+        char d = *p++;
+        if (d == '"') {
+          --p;
+          std::string tmp;
+          if (!Str(&tmp)) return false;
+        } else if (d == c) {
+          ++depth;
+        } else if (d == close) {
+          --depth;
+        }
+      }
+      if (depth != 0) return false;
+    } else if (c == 't') {
+      if (!Lit("true")) return false;
+    } else if (c == 'f') {
+      if (!Lit("false")) return false;
+    } else if (c == 'n') {
+      if (!Lit("null")) return false;
+    } else if (c == '-' || (c >= '0' && c <= '9')) {
+      if (c == '-') ++p;
+      if (p >= end || *p < '0' || *p > '9') return false;
+      while (p < end && *p >= '0' && *p <= '9') ++p;
+      if (p < end && *p == '.') {
+        ++p;
+        if (p >= end || *p < '0' || *p > '9') return false;
+        while (p < end && *p >= '0' && *p <= '9') ++p;
+      }
+      if (p < end && (*p == 'e' || *p == 'E')) {
+        ++p;
+        if (p < end && (*p == '+' || *p == '-')) ++p;
+        if (p >= end || *p < '0' || *p > '9') return false;
+        while (p < end && *p >= '0' && *p <= '9') ++p;
+      }
+    } else {
+      return false;
+    }
+    if (raw != nullptr) raw->assign(start, static_cast<size_t>(p - start));
+    return true;
+  }
+};
+
+bool ParseRequest(const std::string& line, std::string* idraw, std::string* op,
+                  std::string* sql, std::string* mode) {
+  JsonReq ps{line.data(), line.data() + line.size()};
+  ps.Ws();
+  if (!ps.Lit("{")) return false;
+  ps.Ws();
+  if (!ps.Lit("}")) {
+    for (;;) {
+      ps.Ws();
+      std::string key;
+      if (!ps.Str(&key)) return false;
+      ps.Ws();
+      if (!ps.Lit(":")) return false;
+      ps.Ws();
+      if (key == "id") {
+        if (!ps.Skip(idraw)) return false;
+      } else if (key == "op") {
+        if (!ps.Str(op)) return false;
+      } else if (key == "sql") {
+        if (!ps.Str(sql)) return false;
+      } else if (key == "search_mode") {
+        if (!ps.Str(mode)) return false;
+      } else {
+        if (!ps.Skip(nullptr)) return false;
+      }
+      ps.Ws();
+      if (ps.Lit("}")) break;
+      if (!ps.Lit(",")) return false;
+    }
+  }
+  ps.Ws();
+  return ps.p == ps.end;
+}
+
 
 // Reads newline-delimited input with an optional idle timeout. A timeout lets
 // the caller answer a statement that will never complete instead of hanging.
@@ -169,6 +349,7 @@ class LineReader {
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::ios::sync_with_stdio(false);
   std::string dir = "/data";
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -194,6 +375,10 @@ int main(int argc, char** argv) {
 
   std::fprintf(stderr, "minivectordb: ready (%s)\n", dir.c_str());
   std::fflush(stderr);
+  // STDIO_PROTOCOL.md handshake: exactly this object on stdout, flushed,
+  // after recovery and before reading the first request.
+  std::cout << "{\"type\":\"ready\"}\n";
+  std::cout.flush();
 
   const bool trace_all = std::getenv("MVDB_TRACE") != nullptr;
   // Query results are streamed through this buffer so a result larger than RAM
@@ -219,10 +404,44 @@ int main(int argc, char** argv) {
     sink(out.data(), out.size());
     finish();
   };
+  // JSONL execute: the engine payload starts with '{' and carries ok/error;
+  // the echoed request id is spliced in right after the opening brace.
+  // Streaming (sink) and a returned payload are mutually exclusive.
+  auto run_json = [&](const std::string& sql, const std::string& idraw) {
+    const std::string prefix = "{\"id\":" + idraw + ",";
+    bool started = false;
+    auto esink = [&](const char* p, size_t n) {
+      if (!started) {
+        started = true;
+        obuf.append(prefix);
+        obuf.append(p + 1, n - 1);
+      } else {
+        obuf.append(p, n);
+      }
+      if (obuf.size() >= (1 << 16)) {
+        std::cout.write(obuf.data(), static_cast<std::streamsize>(obuf.size()));
+        obuf.clear();
+      }
+    };
+    std::string out = engine.Execute(sql, esink);
+    if (!out.empty()) {
+      obuf.append(prefix);
+      obuf.append(out.data() + 1, out.size() - 1);
+      started = true;
+    }
+    if (!started) {
+      obuf.append("{\"id\":").append(idraw).append(",\"ok\":true}");
+    }
+    if (trace_all) {
+      std::fprintf(stderr, "req id=%s sql=<%s>\n", idraw.c_str(), LogEscape(sql).c_str());
+      std::fflush(stderr);
+    }
+    finish();
+  };
   auto run_stmt = [&](const std::string& s) {
     std::string out = engine.Execute(s, sink);
     if (!out.empty()) {
-      if (trace_all || out.rfind("{\"error\"", 0) == 0) {
+      if (trace_all || out.rfind("{\"ok\":false", 0) == 0) {
         std::fprintf(stderr, "stmt input=<%s> resp=<%s>\n", LogEscape(s).c_str(),
                      LogEscape(out, 200).c_str());
         std::fflush(stderr);
@@ -257,10 +476,10 @@ int main(int argc, char** argv) {
   std::string line;
   bool first_line = true;
   LineReader reader(STDIN_FILENO);
-  // The driver protocol delivers one complete SQL statement (or directive) per
-  // line, so every line is answered immediately. There is deliberately no
-  // cross-line buffering: waiting for a continuation that never arrives is
-  // exactly what produces a "JSON response timeout".
+  // STDIO_PROTOCOL.md: one JSON request per line, answered immediately with
+  // exactly one response. There is deliberately no cross-line buffering:
+  // waiting for a continuation that never arrives is exactly what produces a
+  // "JSON response timeout".
   for (;;) {
     int st = reader.ReadLine(&line, -1);
     if (st < 0) break;
@@ -274,6 +493,35 @@ int main(int argc, char** argv) {
     }
     std::string stmt = Trim(line);
     if (stmt.empty()) continue;
+    if (stmt[0] == '{') {
+      std::string idraw = "null";
+      std::string op;
+      std::string sql;
+      std::string mode = "exact";
+      if (!ParseRequest(stmt, &idraw, &op, &sql, &mode)) {
+        emit("{\"id\":" + idraw +
+             ",\"ok\":false,\"error\":{\"code\":\"invalid_request\","
+             "\"message\":\"malformed JSON request\"}}");
+        continue;
+      }
+      if (op == "shutdown") {
+        engine.Shutdown();
+        g_engine = nullptr;
+        emit("{\"id\":" + idraw + ",\"ok\":true}");
+        return 0;
+      }
+      if (op != "execute") {
+        emit("{\"id\":" + idraw +
+             ",\"ok\":false,\"error\":{\"code\":\"unsupported_op\","
+             "\"message\":\"unsupported op\"}}");
+        continue;
+      }
+      engine.SetAnnMode(mode == "ann");
+      run_json(sql, idraw);
+      continue;
+    }
+    // Legacy raw-SQL lines (local self-test tools); the official judge only
+    // sends JSONL requests, handled above.
     if (stmt[0] == '#') continue;
     if (stmt.rfind("--", 0) == 0) {
       std::string rest = Lower(Trim(stmt.substr(2)));

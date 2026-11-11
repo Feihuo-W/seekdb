@@ -21,6 +21,10 @@ import time
 TOL = 1e-5
 FAILS = []
 COUNT = [0]
+# --jsonl drives the official STDIO_PROTOCOL JSONL path (id echo + boolean ok
+# are verified on every response); the default drives raw SQL lines.
+JSONL = False
+SEQ = [0]
 
 
 def f32(x):
@@ -40,35 +44,74 @@ class Db:
         self.p = subprocess.Popen([binary, "--data", datadir], stdin=subprocess.PIPE,
                                   stdout=subprocess.PIPE, stderr=self.err)
         self.buf = b""
+        self.jsonl = JSONL
+        self.mode = "exact"
+        self.expect_id = None
 
     def send(self, sql):
-        self.p.stdin.write(sql.encode("utf-8") + b"\n")
+        if self.jsonl:
+            if sql.startswith("--mode"):
+                self.mode = "ann" if "ann" in sql else "exact"
+                return
+            SEQ[0] += 1
+            self.expect_id = SEQ[0]
+            req = {"id": SEQ[0], "op": "execute", "sql": sql, "search_mode": self.mode}
+            self.p.stdin.write((json.dumps(req, ensure_ascii=False) + "\n").encode("utf-8"))
+        else:
+            self.p.stdin.write(sql.encode("utf-8") + b"\n")
         self.p.stdin.flush()
 
     def read(self, timeout=60.0):
         fd = self.p.stdout.fileno()
         deadline = time.time() + timeout
-        while b"\n" not in self.buf:
-            remain = deadline - time.time()
-            if remain <= 0:
-                raise TimeoutError("no output")
-            r, _, _ = select.select([fd], [], [], remain)
-            if not r:
-                raise TimeoutError("no output")
-            chunk = os.read(fd, 1 << 16)
-            if not chunk:
-                raise EOFError("process exited")
-            self.buf += chunk
-        line, self.buf = self.buf.split(b"\n", 1)
-        return json.loads(line.decode("utf-8"))
+        while True:
+            while b"\n" not in self.buf:
+                remain = deadline - time.time()
+                if remain <= 0:
+                    raise TimeoutError("no output")
+                r, _, _ = select.select([fd], [], [], remain)
+                if not r:
+                    raise TimeoutError("no output")
+                chunk = os.read(fd, 1 << 16)
+                if not chunk:
+                    raise EOFError("process exited")
+                self.buf += chunk
+            line, self.buf = self.buf.split(b"\n", 1)
+            r = json.loads(line.decode("utf-8"))
+            if isinstance(r, dict) and r.get("type") == "ready":
+                continue
+            if self.jsonl and self.expect_id is not None:
+                if type(r.get("id")) is not type(self.expect_id) or r.get("id") != self.expect_id:
+                    raise AssertionError("id echo: got %r, want %r" % (r.get("id"), self.expect_id))
+                if not isinstance(r.get("ok"), bool):
+                    raise AssertionError("missing boolean ok: %r" % (r,))
+                self.expect_id = None
+            if isinstance(r, dict) and "ok" in r:
+                if r["ok"] is False:
+                    return {"error": (r.get("error") or {}).get("code", "unknown")}
+                return {k: v for k, v in r.items() if k not in ("ok", "id")}
+            return r
 
     def q(self, sql):
         self.send(sql)
         return self.read()
 
     def restart(self):
-        self.send("--restart")
+        if self.jsonl:
+            SEQ[0] += 1
+            self.expect_id = SEQ[0]
+            req = {"id": SEQ[0], "op": "shutdown"}
+            self.p.stdin.write((json.dumps(req) + "\n").encode("utf-8"))
+            self.p.stdin.flush()
+            self.read()
+        else:
+            self.send("--restart")
         self.p.wait(timeout=60)
+        if self.p.returncode != 0:
+            raise AssertionError("restart: exit code %d" % self.p.returncode)
+        extra = self.buf + self.p.stdout.read()
+        if extra:
+            raise AssertionError("restart: extra stdout %r" % extra[:120])
         self.err.close()
         return Db(self.binary, self.datadir)
 
@@ -480,6 +523,67 @@ def protocol_suite(binary, datadir):
     db.close()
 
 
+# ---------------------------------------------------- official JSONL protocol
+def jsonl_protocol_suite(binary, datadir):
+    db = Db(binary, datadir)
+
+    def raw_req(obj):
+        db.p.stdin.write((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+        db.p.stdin.flush()
+
+    # integer id beyond 2^53 must be echoed without float precision loss
+    big = 2**53 + 1
+    db.expect_id = big
+    raw_req({"id": big, "op": "execute", "search_mode": "exact",
+             "sql": "CREATE TABLE j (id BIGINT PRIMARY KEY, s VARCHAR(16))"})
+    chk("big id echo", db.read(), {})
+    # string id keeps its JSON type
+    db.expect_id = "req-7"
+    raw_req({"id": "req-7", "op": "execute", "search_mode": "exact",
+             "sql": "INSERT INTO j VALUES (1, '你好;世界')"})
+    chk("string id echo", db.read(), {"affected_rows": 1})
+    # \u escapes including a surrogate pair (U+1F600)
+    db.expect_id = 99
+    db.p.stdin.write((json.dumps(
+        {"id": 99, "op": "execute", "search_mode": "exact",
+         "sql": "INSERT INTO j VALUES (2, '\U0001F600')"}, ensure_ascii=True) + "\n").encode("utf-8"))
+    db.p.stdin.flush()
+    chk("unicode escape insert", db.read(), {"affected_rows": 1})
+    chk("unicode roundtrip", db.q("SELECT s FROM j WHERE id = 2"),
+        {"columns": ["s"], "rows": [["\U0001F600"]]})
+    # a semicolon inside a string literal must not split the statement
+    chk("semicolon in string", db.q("SELECT s FROM j WHERE id = 1"),
+        {"columns": ["s"], "rows": [["你好;世界"]]})
+    # whitespace-tolerant request parsing (json.dumps default spacing)
+    db.expect_id = 100
+    db.p.stdin.write(b'{ "id" : 100 , "op" : "execute" , "sql" : "SELECT id FROM j ORDER BY id" , "search_mode" : "exact" }\n')
+    db.p.stdin.flush()
+    chk("spaced request", db.read(), {"columns": ["id"], "rows": [[1], [2]]})
+    # malformed request still gets exactly one error response echoing the id
+    db.expect_id = 5
+    db.p.stdin.write(b'{"id": 5, "op": "execute", "sql": }\n')
+    db.p.stdin.flush()
+    chk("malformed request", db.read(), {"error": "invalid_request"})
+    # unknown op
+    db.expect_id = 6
+    raw_req({"id": 6, "op": "frobnicate"})
+    chk("unknown op", db.read(), {"error": "unsupported_op"})
+    # search_mode is accepted per request (ann falls back to exact results)
+    db.mode = "ann"
+    chk("ann mode query", db.q("SELECT id FROM j ORDER BY id"),
+        {"columns": ["id"], "rows": [[1], [2]]})
+    db.mode = "exact"
+    # shutdown: ok response, exit code 0, nothing afterwards on stdout
+    SEQ[0] += 1
+    db.expect_id = SEQ[0]
+    raw_req({"id": SEQ[0], "op": "shutdown"})
+    chk("shutdown ok", db.read(), {})
+    db.p.wait(timeout=30)
+    chk_raw("shutdown exit 0", db.p.returncode, 0)
+    chk_raw("no stdout after shutdown", db.buf + db.p.stdout.read(), b"")
+    db.err.close()
+
+
 # ---------------------------------------------------------------- adversarial
 def adversarial_suite(db):
     ok_empty("create t", db.q(
@@ -710,10 +814,14 @@ def signal_suite(binary, datadir):
 
 # -------------------------------------------------------------------- main
 def main():
+    global JSONL
     here = os.path.dirname(os.path.abspath(__file__))
     ap = argparse.ArgumentParser()
     ap.add_argument("--binary", default=os.path.join(here, "..", "build", "minivectordb"))
+    ap.add_argument("--jsonl", action="store_true",
+                    help="drive the official STDIO_PROTOCOL JSONL path")
     args = ap.parse_args()
+    JSONL = args.jsonl
 
     def run(name, fn, fresh):
         datadir = tempfile.mkdtemp(prefix="mvdb-spec-")
@@ -742,6 +850,9 @@ def main():
     run("unsupported", unsupported_suite, True)
     protocol_suite(args.binary, tempfile.mkdtemp(prefix="mvdb-spec-proto-"))
     print("section %-14s checks=%d failures=%d" % ("protocol", COUNT[0], len(FAILS)), flush=True)
+    if JSONL:
+        jsonl_protocol_suite(args.binary, tempfile.mkdtemp(prefix="mvdb-spec-jsonl-"))
+        print("section %-14s checks=%d failures=%d" % ("jsonl", COUNT[0], len(FAILS)), flush=True)
 
     print("\n%d checks, %d failures" % (COUNT[0], len(FAILS)))
     for f in FAILS[:25]:

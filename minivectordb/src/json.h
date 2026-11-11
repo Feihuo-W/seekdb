@@ -61,24 +61,28 @@ inline void OutValToJson(std::string& out, const OutVal& v) {
   }
 }
 
+// Response payloads follow STDIO_PROTOCOL.md; main.cpp prepends the request
+// id. Errors carry a code (checked by the judge) and a message (ignored).
 inline std::string JsonError(const std::string& err) {
-  std::string out = "{\"error\":\"";
+  std::string out = "{\"ok\":false,\"error\":{\"code\":\"";
   JsonEscapeTo(out, err);
-  out += "\"}";
+  out += "\",\"message\":\"";
+  JsonEscapeTo(out, err);
+  out += "\"}}";
   return out;
 }
 
-inline std::string JsonOk() { return "{}"; }
+inline std::string JsonOk() { return "{\"ok\":true}"; }
 
 inline std::string JsonAffected(int64_t n) {
-  return "{\"affected_rows\":" + std::to_string(n) + "}";
+  return "{\"ok\":true,\"affected_rows\":" + std::to_string(n) + "}";
 }
 
 inline std::string JsonRows(const std::vector<std::string>& cols,
                             const std::vector<std::vector<OutVal>>& rows) {
   std::string out;
   out.reserve(64 + rows.size() * 32);
-  out += "{\"columns\":[";
+  out += "{\"ok\":true,\"columns\":[";
   for (size_t i = 0; i < cols.size(); ++i) {
     if (i) out += ',';
     out += '"';
