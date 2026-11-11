@@ -18,10 +18,13 @@ import time
 
 class Db:
     def __init__(self, binary, datadir):
+        self.err = open(os.path.join(datadir, "stderr.log"), "ab")
         self.p = subprocess.Popen([binary, "--data", datadir],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                  stderr=subprocess.DEVNULL)
+                                  stderr=self.err)
         self.buf = b""
+        self.max_resp = 0.0
+        self.max_resp_sql = ""
 
     def send(self, line):
         self.p.stdin.write(line.encode("utf-8") + b"\n")
@@ -45,8 +48,14 @@ class Db:
         return json.loads(line.decode("utf-8"))
 
     def q(self, sql, timeout=600):
+        t0 = time.time()
         self.send(sql)
-        return self.read(timeout)
+        r = self.read(timeout)
+        dt = time.time() - t0
+        if dt > self.max_resp:
+            self.max_resp = dt
+            self.max_resp_sql = sql[:80]
+        return r
 
     def hwm_mb(self):
         try:
@@ -124,6 +133,8 @@ def main():
         ins += cnt
     dt = time.time() - t0
     check("load %d rows" % ins, ins == n, "%.1fs, %.0f rows/s, hwm=%dMB" % (dt, ins / dt, db.hwm_mb()))
+    load_max = db.max_resp
+    print("     slowest single response during load: %.3fs (%s)" % (load_max, db.max_resp_sql), flush=True)
 
     data_gb = ins * (dim * 4 + 40) / 1e9
     print("     approx row data: %.2f GiB; peak RSS so far: %d MiB" % (data_gb, db.hwm_mb()), flush=True)
@@ -211,6 +222,7 @@ def main():
     anon = mem.get("RssAnon", hwm)
     check("anonymous RSS bounded vs data", anon < max(600, data_gb * 1024 * 0.5),
           "anon=%dMiB vs data=%.2fGiB" % (anon, data_gb))
+    check("load response latency bounded", load_max < 5.0, "max=%.3fs" % load_max)
     db.close()
     if not args.keep:
         import shutil

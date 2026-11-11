@@ -87,10 +87,13 @@ BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
 - 恢复：启动时先加载 snapshot，再顺序重放 WAL，仅应用带 COMMIT 的事务；遇到
   CRC/长度不完整的尾部记录即截断逻辑末端，因此恢复途中再次被杀可重复恢复。
   读取阶段不写文件，恢复幂等。
-- 压缩：WAL 超过 256 MiB（含正常关闭时）把当前可见行流式重写为
-  `snapshot.tmp`，`fsync` 后原子 `rename`，再截断并收缩 WAL 文件（回到 16 MiB 空白
-  映射）；重写期间不复制整表主键索引。崩溃发生在任一窗口都可由“快照 + 完整 WAL
-  重放”得到一致状态。
+- 压缩：WAL 超过 256 MiB 时启动**增量压缩会话**，把当前可见行分步重写为
+  `snapshot.tmp`（每条语句最多做约 50ms/64MB 的压缩工作，任何单条响应都不会被
+  整表重写阻塞），同时把会话水位之后的 WAL 增量复制到 `wal.tmp`；完成后依次原子
+  `rename` 快照与 WAL。会话期间的新事务照常提交；恢复不变式是“新快照 + 水位之后
+  的全部事务重放 = 精确状态”（PUT/DEL 是按主键的绝对操作）。崩溃落在任一窗口
+  （旧快照+完整 WAL、新快照+完整 WAL、新快照+WAL 尾部）都能恢复一致；正常关闭
+  直接丢弃未完成会话，不做整表重写。
 - 向量检索：精确扫描 + AVX2/FMA 距离计算；TopK 先用 float32 距离保留 `K + max(3K,64)`
   个候选，再用 double 复核距离、按主键打破并列并截断到 K。`ann` 模式当前同样返回精确
   结果（Recall@K=1.0）。索引创建信息随 schema 持久化，增删改始终作用于当前可见记录。
@@ -113,7 +116,7 @@ python3 minivectordb/tools/fuzz_diff.py --crash --seeds 10 --steps 200  # 随机
 python3 minivectordb/tools/scenario_checks.py    # 多表事务/原子性/引号/ANN/崩溃回滚
 python3 minivectordb/tools/scenario_checks.py --scale-rows 500000 --scale-dim 64  # 压缩与恢复
 python3 minivectordb/tools/spec_suite.py   # 按题面逐条自测（229 项：类型/语义/事务/恢复/协议/对抗）
-python3 minivectordb/tools/stress_recovery.py  # 压缩窗口强杀、恢复期连杀、提交后强杀压力
+python3 minivectordb/tools/stress_recovery.py  # 增量压缩会话内强杀、关闭/恢复期连杀、提交后强杀压力
+python3 minivectordb/tools/bigdata_check.py --rows 3000000 --dim 128  # 超内存数据：扫描/排序/批量改删/重启，监控匿名 RSS 与单响应延迟
 python3 minivectordb/tools/hostile_driver.py # 恶意输入：每行输入必须回一条 JSON，不得挂死
-python3 minivectordb/tools/bigdata_check.py --rows 3000000  # 超内存数据：全表扫描/排序/批量改删/重启，监控匿名 RSS
 ```

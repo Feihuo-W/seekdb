@@ -106,7 +106,6 @@ class Engine {
 
   // storage
   bool Init();
-  bool Recover();
   bool LoadSnapshot();
   void ReplayWal();
   bool OpenSnapshot();
@@ -114,7 +113,16 @@ class Engine {
   bool EnsureDir();
   bool AppendRecord(uint8_t type, uint32_t txn, const std::string& payload, uint64_t* off);
   bool SyncWal();
-  bool Compact();
+  // Incremental compaction: the snapshot rewrite is spread across statements
+  // (bounded work per step) so no single response ever blocks on a full-table
+  // rewrite. The WAL tail after the session watermark is copied alongside.
+  void MaybeCompactStep();
+  bool StartCompact();
+  void AbortCompact();
+  bool FinishCompact();
+  bool CompactEmit(uint8_t type, uint32_t txn, const std::string& payload);
+  bool CompactFlush();
+  bool CompactCopyTail();
   void CloseAll();
 
   // schema helpers
@@ -182,7 +190,26 @@ class Engine {
   std::map<uint32_t, std::map<int64_t, OverlayRow>> overlay_;
 
   bool ann_ = false;
-  bool dirty_since_compact_ = false;
+
+  // Incremental compaction session state.
+  struct CompactRef {
+    uint32_t tid;
+    int64_t pk;
+    uint64_t off;    // offset in the new snapshot
+    RowRef src;      // version that was written
+  };
+  bool compacting_ = false;
+  int compact_fd_ = -1;        // snapshot.tmp being written
+  int compact_tail_fd_ = -1;   // wal.tmp: copy of WAL[watermark, end)
+  uint64_t compact_watermark_ = 0;
+  uint64_t compact_tail_copied_ = 0;
+  uint32_t compact_next_tid_ = 0;
+  bool compact_schema_done_ = false;
+  bool compact_have_last_ = false;
+  int64_t compact_last_pk_ = 0;
+  uint64_t compact_off_ = 0;
+  std::string compact_buf_;
+  std::vector<CompactRef> compact_refs_;  // sorted by (tid, pk)
 };
 
 }  // namespace vdb

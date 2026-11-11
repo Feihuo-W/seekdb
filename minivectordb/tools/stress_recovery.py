@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Crash-window stress: kill during shutdown compaction and recovery.
+"""Crash-window stress: kill during compaction, shutdown and recovery.
 
 These scenarios are hard to express as mysqltest cases:
-- SIGKILL while the process is compacting on `--restart` (rename/truncate window)
+- SIGKILL inside a live incremental-compaction session (snapshot.tmp present)
+- SIGKILL while the process is syncing and exiting on `--restart`
 - repeated SIGKILL while the next process is still recovering
 - SIGKILL after every acknowledged commit
 """
@@ -100,12 +101,15 @@ def build_rows(db, rows, dim, grp_mod=10):
             raise RuntimeError("insert failed: %r" % (r,))
 
 
-def verify_rows(db, rows, dim):
-    r = db.q("SELECT id FROM big ORDER BY id LIMIT %d" % (rows + 10))
+def verify_rows(db, rows, dim, extra=0, last_id=None):
+    total = rows + extra
+    if last_id is None:
+        last_id = rows - 1
+    r = db.q("SELECT id FROM big ORDER BY id LIMIT %d" % (total + 10))
     ids = [row[0] for row in r["rows"]]
-    chk("row count", len(ids), rows)
+    chk("row count", len(ids), total)
     chk("first id", ids[0], 0)
-    chk("last id", ids[-1], rows - 1)
+    chk("last id", ids[-1], last_id)
     r = db.q("SELECT id FROM big ORDER BY L2_DISTANCE(v, '%s') LIMIT 10" % vlit(dim, "0"))
     chk("topk size", len(r["rows"]), 10)
     r = db.q("SELECT id FROM big WHERE grp = 7 ORDER BY id")
@@ -113,15 +117,15 @@ def verify_rows(db, rows, dim):
 
 
 def compaction_window(binary, rows, dim, attempts, seed):
-    print("== compaction window: %d rows x %d dim, %d attempts ==" % (rows, dim, attempts))
+    print("== restart-shutdown window: %d rows x %d dim, %d attempts ==" % (rows, dim, attempts))
     rng = random.Random(seed)
     for attempt in range(attempts):
         datadir = tempfile.mkdtemp(prefix="mvdb-cw-")
         db = Db(binary, datadir)
         db.q("CREATE TABLE big (id BIGINT PRIMARY KEY, grp BIGINT, v VECTOR(%d))" % dim)
         build_rows(db, rows, dim)
-        # ask for a clean shutdown (which compacts >16MiB of WAL), then kill at a
-        # random point inside the compaction window
+        # ask for a clean shutdown, then kill at a random point while the
+        # process is syncing and exiting
         db.send("--restart")
         delay = rng.uniform(0.0, 0.20)
         time.sleep(delay)
@@ -134,6 +138,68 @@ def compaction_window(binary, rows, dim, attempts, seed):
         db.close()
         files = sorted(os.listdir(datadir))
         print("   attempt %d killed after %.0f ms, files=%s" % (attempt + 1, delay * 1000, files))
+        shutil.rmtree(datadir, ignore_errors=True)
+
+
+def incremental_compaction_window(binary, rows, dim, attempts, seed):
+    """Kill inside a live incremental-compaction session (snapshot.tmp present),
+    then kill again during the following recovery, then verify everything."""
+    print("== incremental compaction window: %d rows x %d dim, %d attempts ==" % (rows, dim, attempts))
+    rng = random.Random(seed)
+    for attempt in range(attempts):
+        datadir = tempfile.mkdtemp(prefix="mvdb-ic-")
+        db = Db(binary, datadir)
+        db.q("CREATE TABLE big (id BIGINT PRIMARY KEY, grp BIGINT, v VECTOR(%d))" % dim)
+        build_rows(db, rows, dim)  # enough rows to push the WAL past the threshold
+        # The session starts on the next statement and advances one bounded step
+        # per statement. Drive it with point queries and kill after a random
+        # number of steps so different attempts hit different session phases.
+        # Interleave explicit transactions: commits must survive the crash,
+        # rollbacks must not appear.
+        kill_after = rng.randint(1, 150)
+        steps = 0
+        saw_session = False
+        committed = []
+        rolled_back = []
+        v = vlit(dim)
+        while steps < 400:
+            db.q("SELECT id FROM big WHERE id = %d" % (steps % rows))
+            steps += 1
+            if steps % 20 == 0:
+                pk = rows + steps
+                db.q("BEGIN")
+                db.q("INSERT INTO big VALUES (%d,%d,'%s')" % (pk, pk % 10, v))
+                db.q("COMMIT")
+                committed.append(pk)
+            if steps % 20 == 10:
+                pk = rows + 100000 + steps
+                db.q("BEGIN")
+                db.q("INSERT INTO big VALUES (%d,%d,'%s')" % (pk, pk % 10, v))
+                db.q("ROLLBACK")
+                rolled_back.append(pk)
+            if os.path.exists(os.path.join(datadir, "snapshot.tmp")):
+                saw_session = True
+                if steps >= kill_after:
+                    break
+        db.kill()
+        # Kill again while the next process is still recovering the large
+        # snapshot + WAL tail, then recover for real and verify.
+        db = Db(binary, datadir)
+        time.sleep(rng.uniform(0.0, 0.3))
+        db.kill()
+        db = Db(binary, datadir)
+        verify_rows(db, rows, dim, extra=len(committed),
+                    last_id=max(committed) if committed else rows - 1)
+        r = db.q("SELECT id, grp FROM big WHERE id = %d" % (rows // 2))
+        chk("mid row content", r["rows"], [[rows // 2, (rows // 2) % 10]])
+        for pk in committed:
+            r = db.q("SELECT id, grp FROM big WHERE id = %d" % pk)
+            chk("txn commit survived @%d" % pk, r["rows"], [[pk, pk % 10]])
+        for pk in rolled_back:
+            r = db.q("SELECT id FROM big WHERE id = %d" % pk)
+            chk("txn rollback absent @%d" % pk, r["rows"], [])
+        db.close()
+        print("   attempt %d killed after %d steps (session seen: %s, committed=%d)" % (attempt + 1, steps, saw_session, len(committed)))
         shutil.rmtree(datadir, ignore_errors=True)
 
 
@@ -181,6 +247,7 @@ def main():
     attempts = 1 if args.quick else 3
 
     compaction_window(args.binary, rows, dim, attempts, 7)
+    incremental_compaction_window(args.binary, 500000, 128, 1 if args.quick else 4, 11)
     recovery_kill_loop(args.binary, 1000, 16, 3 if args.quick else 10)
     commit_kill_loop(args.binary, 5 if args.quick else 12)
 

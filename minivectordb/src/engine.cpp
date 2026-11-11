@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <chrono>
 #include <limits>
 #include <queue>
 #include <unordered_set>
@@ -219,6 +220,10 @@ bool Engine::Init() {
     init_error_ = "io_error";
     return false;
   }
+  // Leftover temp files from an interrupted compaction are never authoritative:
+  // snapshot.dat + wal.log always form a recoverable pair on their own.
+  ::unlink((dir_ + "/snapshot.tmp").c_str());
+  ::unlink((dir_ + "/wal.tmp").c_str());
   if (!OpenSnapshot()) return false;
   if (!OpenWal()) return false;
   if (!LoadSnapshot()) return false;
@@ -915,8 +920,6 @@ bool Engine::CommitOverlay() {
     t->second.scan_dirty = true;
   }
   overlay_.clear();
-  dirty_since_compact_ = true;
-  if (wal_size_ > kCompactWalBytes) Compact();
   return true;
 }
 
@@ -924,6 +927,7 @@ void Engine::DropOverlay() { overlay_.clear(); }
 
 std::string Engine::Execute(const std::string& sql, const OutSink& sink) {
   if (!ok_) return JsonError(init_error_.empty() ? "io_error" : init_error_);
+  MaybeCompactStep();
   Statement st = Parse(sql);
   if (!st.error.empty()) return JsonError(st.error);
   switch (st.kind) {
@@ -1609,9 +1613,7 @@ std::string Engine::ExecUpdate(const Statement& st) {
     }
     for (const auto& c : changed) t->rows[c.pk] = RowRef{c.off, 1};
     t->scan_dirty = true;
-    dirty_since_compact_ = true;
-    if (wal_size_ > kCompactWalBytes) Compact();
-    return JsonAffected(static_cast<int64_t>(changed.size()));
+      return JsonAffected(static_cast<int64_t>(changed.size()));
   }
   std::vector<std::pair<int64_t, std::string>> changed;
   ForEachRow(*t, [&](int64_t pk, const RowView& v) {
@@ -1659,9 +1661,7 @@ std::string Engine::ExecDelete(const Statement& st) {
     }
     for (int64_t pk : deleted) t->rows.erase(pk);
     t->scan_dirty = true;
-    dirty_since_compact_ = true;
-    if (wal_size_ > kCompactWalBytes) Compact();
-    return JsonAffected(static_cast<int64_t>(deleted.size()));
+      return JsonAffected(static_cast<int64_t>(deleted.size()));
   }
   std::vector<int64_t> deleted;
   ForEachRow(*t, [&](int64_t pk, const RowView& v) {
@@ -1675,99 +1675,248 @@ std::string Engine::ExecDelete(const Statement& st) {
   return JsonAffected(static_cast<int64_t>(deleted.size()));
 }
 
-bool Engine::Compact() {
+// Compaction runs as a session spread across statements. At session start the
+// WAL ends at a complete-transaction boundary (the watermark); the new snapshot
+// is written from the live committed rows while new transactions keep appending
+// to the WAL and are copied into wal.tmp. Recovery invariant: snapshot plus a
+// replay of every transaction after the watermark reproduces the exact state,
+// because PUT/DEL are absolute per-primary-key operations. A crash at any point
+// leaves either (old snapshot + full WAL) or (new snapshot + full WAL) or
+// (new snapshot + WAL tail); all three recover correctly.
+void Engine::MaybeCompactStep() {
+  if (!compacting_) {
+    if (wal_size_ <= kCompactWalBytes || txn_active_ || !overlay_.empty()) return;
+    if (!StartCompact()) return;
+  }
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
+  const uint64_t byte_limit = compact_off_ + (64u << 20);
+  for (;;) {
+    auto it = tables_.lower_bound(compact_next_tid_);
+    if (it == tables_.end()) {
+      FinishCompact();
+      return;
+    }
+    TableState& ts = it->second;
+    if (!compact_schema_done_) {
+      if (!CompactEmit(REC_SCHEMA, 0, SerializeSchema(ts.schema))) {
+        AbortCompact();
+        return;
+      }
+      compact_schema_done_ = true;
+    }
+    auto rit = compact_have_last_ ? ts.rows.upper_bound(compact_last_pk_) : ts.rows.begin();
+    while (rit != ts.rows.end()) {
+      uint32_t len = 0;
+      const uint8_t* payload = RowPayload(rit->second, &len);
+      if (payload != nullptr) {
+        std::string rec;
+        PutU32(rec, it->first);
+        PutI64(rec, rit->first);
+        rec.append(reinterpret_cast<const char*>(payload), len);
+        uint64_t this_off = compact_off_;
+        if (!CompactEmit(REC_PUT, 0, rec)) {
+          AbortCompact();
+          return;
+        }
+        compact_refs_.push_back(CompactRef{it->first, rit->first, this_off, rit->second});
+      }
+      compact_last_pk_ = rit->first;
+      compact_have_last_ = true;
+      ++rit;
+      if ((compact_refs_.size() & 255) == 0 &&
+          (std::chrono::steady_clock::now() >= deadline || compact_off_ >= byte_limit)) {
+        if (!CompactCopyTail()) AbortCompact();
+        return;
+      }
+    }
+    compact_next_tid_ = it->first + 1;
+    compact_schema_done_ = false;
+    compact_have_last_ = false;
+    if (std::chrono::steady_clock::now() >= deadline || compact_off_ >= byte_limit) {
+      if (!CompactCopyTail()) AbortCompact();
+      return;
+    }
+  }
+}
+
+bool Engine::StartCompact() {
   std::string tmp = dir_ + "/snapshot.tmp";
   int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) return false;
-  // Flat list of relocated rows; a second full pk-index would double the
-  // resident index memory while compacting a table larger than RAM.
-  struct NewRef {
-    uint32_t tid;
-    int64_t pk;
-    uint64_t off;
-  };
-  std::vector<NewRef> new_refs;
-  std::string buf;
-  buf.reserve(4u << 20);
-  uint64_t off = 0;
-  auto flush = [&]() {
-    if (!buf.empty()) {
-      if (!WriteAll(fd, buf.data(), buf.size())) return false;
-      buf.clear();
-    }
-    return true;
-  };
-  auto emit = [&](uint8_t type, uint32_t txn, const std::string& payload) {
-    uint8_t hdr[kRecHeader];
-    uint32_t len = static_cast<uint32_t>(payload.size());
-    uint32_t crc = Crc32(payload.data(), payload.size());
-    std::memcpy(hdr, &kMagic, 4);
-    std::memcpy(hdr + 4, &len, 4);
-    std::memcpy(hdr + 8, &crc, 4);
-    hdr[12] = type;
-    std::memcpy(hdr + 13, &txn, 4);
-    buf.append(reinterpret_cast<char*>(hdr), kRecHeader);
-    buf += payload;
-    off += kRecHeader + payload.size();
-  };
-  bool ok = true;
-  for (auto& [tid, ts] : tables_) {
-    emit(REC_SCHEMA, 0, SerializeSchema(ts.schema));
-    for (auto& [pk, ref] : ts.rows) {
-      uint32_t len = 0;
-      const uint8_t* payload = RowPayload(ref, &len);
-      if (payload == nullptr) continue;
-      std::string rec;
-      PutU32(rec, tid);
-      PutI64(rec, pk);
-      rec.append(reinterpret_cast<const char*>(payload), len);
-      uint64_t this_off = off;
-      emit(REC_PUT, 0, rec);
-      new_refs.push_back(NewRef{tid, pk, this_off});
-      if (buf.size() > (4u << 20)) {
-        if (!flush()) { ok = false; break; }
-      }
-    }
-    if (!ok) break;
-  }
-  if (ok) ok = flush();
-  if (ok) ok = ::fsync(fd) == 0;
-  ::close(fd);
-  if (ok) {
-    std::string final_path = dir_ + "/snapshot.dat";
-    ok = ::rename(tmp.c_str(), final_path.c_str()) == 0;
-    if (ok) ok = FsyncDir(dir_);
-  }
-  if (!ok) {
+  std::string wtmp = dir_ + "/wal.tmp";
+  int wfd = ::open(wtmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  if (wfd < 0) {
+    ::close(fd);
     ::unlink(tmp.c_str());
     return false;
   }
-  if (!OpenSnapshot()) return false;
-  for (const auto& nr : new_refs) {
-    auto t = tables_.find(nr.tid);
-    if (t != tables_.end()) t->second.rows[nr.pk] = RowRef{nr.off, 0};
+  compact_fd_ = fd;
+  compact_tail_fd_ = wfd;
+  compact_watermark_ = wal_size_;
+  compact_tail_copied_ = 0;
+  compact_next_tid_ = tables_.empty() ? 1 : tables_.begin()->first;
+  compact_schema_done_ = false;
+  compact_have_last_ = false;
+  compact_last_pk_ = 0;
+  compact_off_ = 0;
+  compact_buf_.clear();
+  compact_refs_.clear();
+  compacting_ = true;
+  return true;
+}
+
+void Engine::AbortCompact() {
+  if (compact_fd_ >= 0) {
+    ::close(compact_fd_);
+    compact_fd_ = -1;
   }
-  for (auto& [tid, ts] : tables_) ts.scan_dirty = true;
-  // Reset the WAL to a small empty file so a compacted database does not keep
-  // the peak-sized mapping (and preallocated file) around.
+  if (compact_tail_fd_ >= 0) {
+    ::close(compact_tail_fd_);
+    compact_tail_fd_ = -1;
+  }
+  ::unlink((dir_ + "/snapshot.tmp").c_str());
+  ::unlink((dir_ + "/wal.tmp").c_str());
+  compact_buf_.clear();
+  compact_refs_.clear();
+  compacting_ = false;
+}
+
+bool Engine::CompactFlush() {
+  if (!compact_buf_.empty()) {
+    if (!WriteAll(compact_fd_, compact_buf_.data(), compact_buf_.size())) return false;
+#ifdef __linux__
+    // Kick background writeback for the range just written so the final fsync
+    // does not have to flush the whole multi-GB snapshot in one response.
+    ::sync_file_range(compact_fd_, static_cast<off_t>(compact_off_ - compact_buf_.size()),
+                      static_cast<off_t>(compact_buf_.size()), SYNC_FILE_RANGE_WRITE);
+#endif
+    compact_buf_.clear();
+  }
+  return true;
+}
+
+bool Engine::CompactEmit(uint8_t type, uint32_t txn, const std::string& payload) {
+  uint8_t hdr[kRecHeader];
+  uint32_t len = static_cast<uint32_t>(payload.size());
+  uint32_t crc = Crc32(payload.data(), payload.size());
+  std::memcpy(hdr, &kMagic, 4);
+  std::memcpy(hdr + 4, &len, 4);
+  std::memcpy(hdr + 8, &crc, 4);
+  hdr[12] = type;
+  std::memcpy(hdr + 13, &txn, 4);
+  compact_buf_.append(reinterpret_cast<char*>(hdr), kRecHeader);
+  compact_buf_ += payload;
+  compact_off_ += kRecHeader + payload.size();
+  if (compact_buf_.size() > (4u << 20)) return CompactFlush();
+  return true;
+}
+
+bool Engine::CompactCopyTail() {
+  uint64_t pos = compact_watermark_ + compact_tail_copied_;
+  while (pos < wal_size_) {
+    size_t n = static_cast<size_t>(std::min<uint64_t>(wal_size_ - pos, 1u << 20));
+    if (!WriteAll(compact_tail_fd_, wal_base_ + pos, n)) return false;
+    pos += n;
+  }
+  compact_tail_copied_ = wal_size_ - compact_watermark_;
+  return ::fdatasync(compact_tail_fd_) == 0;
+}
+
+bool Engine::FinishCompact() {
+  const auto t_start = std::chrono::steady_clock::now();
+  bool ok = CompactFlush();
+  if (ok) ok = ::fsync(compact_fd_) == 0;
+  ::close(compact_fd_);
+  compact_fd_ = -1;
+  const auto t_sync = std::chrono::steady_clock::now();
+  if (ok) {
+    ok = ::rename((dir_ + "/snapshot.tmp").c_str(), (dir_ + "/snapshot.dat").c_str()) == 0;
+    if (ok) ok = FsyncDir(dir_);
+  }
+  if (ok) ok = CompactCopyTail();
+  if (ok) {
+    ::close(compact_tail_fd_);
+    compact_tail_fd_ = -1;
+    ok = ::rename((dir_ + "/wal.tmp").c_str(), (dir_ + "/wal.log").c_str()) == 0;
+    if (ok) ok = FsyncDir(dir_);
+  }
+  if (!ok) {
+    // The old snapshot mapping and the full WAL are still a consistent pair.
+    AbortCompact();
+    return false;
+  }
+  if (!OpenSnapshot()) {
+    ok_ = false;
+    init_error_ = "io_error";
+    compacting_ = false;
+    return false;
+  }
+  const auto t_swap = std::chrono::steady_clock::now();
+  // Relocate rows whose version did not change during the session and rebase
+  // the WAL references that survive the truncation. compact_refs_ is sorted by
+  // (tid, pk), so this is a single ordered merge pass over the live indexes.
+  size_t ri = 0;
+  for (auto& [tid, ts] : tables_) {
+    while (ri < compact_refs_.size() && compact_refs_[ri].tid < tid) ++ri;
+    size_t rj = ri;
+    for (auto& [pk, ref] : ts.rows) {
+      while (rj < compact_refs_.size() && compact_refs_[rj].tid == tid &&
+             compact_refs_[rj].pk < pk) {
+        ++rj;
+      }
+      if (rj < compact_refs_.size() && compact_refs_[rj].tid == tid &&
+          compact_refs_[rj].pk == pk) {
+        const CompactRef& nr = compact_refs_[rj];
+        if (ref.off == nr.src.off && ref.file == nr.src.file) ref = RowRef{nr.off, 0};
+      }
+      if (ref.file == 1 && ref.off >= compact_watermark_) ref.off -= compact_watermark_;
+    }
+    ts.scan_dirty = true;
+    ts.cache_col = -1;
+    ts.cache_ids.clear();
+    ts.cache_dict.clear();
+    ts.cache_int.clear();
+  }
+  compact_refs_.clear();
+  uint64_t tail = compact_tail_copied_;
   if (wal_base_ != nullptr) {
     ::munmap(wal_base_, wal_cap_);
     wal_base_ = nullptr;
-    wal_cap_ = 0;
   }
-  if (::ftruncate(wal_fd_, 0) != 0) return false;
-  size_t cap = kWalGrowBytes;
-  if (::ftruncate(wal_fd_, static_cast<off_t>(cap)) != 0) return false;
-  void* fresh = ::mmap(nullptr, cap, PROT_READ | PROT_WRITE, MAP_SHARED, wal_fd_, 0);
-  if (fresh == MAP_FAILED) return false;
-  wal_base_ = static_cast<uint8_t*>(fresh);
+  if (wal_fd_ >= 0) ::close(wal_fd_);
+  wal_fd_ = ::open((dir_ + "/wal.log").c_str(), O_RDWR);
+  size_t cap = static_cast<size_t>(tail) + kWalGrowBytes;
+  if (wal_fd_ < 0 || ::ftruncate(wal_fd_, static_cast<off_t>(cap)) != 0) {
+    ok_ = false;
+    init_error_ = "io_error";
+    compacting_ = false;
+    return false;
+  }
+  void* p = ::mmap(nullptr, cap, PROT_READ | PROT_WRITE, MAP_SHARED, wal_fd_, 0);
+  if (p == MAP_FAILED) {
+    ok_ = false;
+    init_error_ = "io_error";
+    compacting_ = false;
+    return false;
+  }
+  wal_base_ = static_cast<uint8_t*>(p);
+  wal_size_ = static_cast<size_t>(tail);
   wal_cap_ = cap;
-  wal_size_ = 0;
-  dirty_since_compact_ = false;
+  compacting_ = false;
+  const auto t_end = std::chrono::steady_clock::now();
+  std::fprintf(stderr,
+               "compact done: snapshot=%lluMB tail=%lluMB sync=%lldms swap=%lldms relocate=%lldms\n",
+               static_cast<unsigned long long>(compact_off_ >> 20),
+               static_cast<unsigned long long>(tail >> 20),
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(t_sync - t_start).count()),
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(t_swap - t_sync).count()),
+               static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_swap).count()));
+  std::fflush(stderr);
   return true;
 }
 
 void Engine::Shutdown() {
+  if (compacting_) AbortCompact();
   overlay_.clear();
   txn_active_ = false;
   // No compaction here: the driver waits for the process to exit on --restart,
