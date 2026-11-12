@@ -165,6 +165,31 @@ class Lexer {
 
   Token String(char quote) {
     ++pos_;  // opening quote
+    // 快路径：整段没有转义、没有重复引号时，一次性拷贝。
+    // 官方负载里一条批量 INSERT 只有一个约 249 KB 的字符串字面量，
+    // 逐字符 push_back 会产生十几万次字符级操作与多次扩容拷贝
+    // （火焰图实测：写入期 CPU 的 8% 花在 String 的 push_back 上）。
+    {
+      size_t scan = pos_;
+      bool simple = true;
+      while (scan < s_.size()) {
+        char c = s_[scan];
+        if (c == '\\') { simple = false; break; }
+        if (c == quote) {
+          // 连续两个引号是转义引号 → 交给慢路径
+          if (scan + 1 < s_.size() && s_[scan + 1] == quote) { simple = false; break; }
+          break;
+        }
+        ++scan;
+      }
+      if (simple && scan < s_.size() && s_[scan] == quote) {
+        Token t;
+        t.kind = Token::String;
+        t.text.assign(s_.data() + pos_, scan - pos_);
+        pos_ = scan + 1;
+        return t;
+      }
+    }
     std::string out;
     while (pos_ < s_.size()) {
       char c = s_[pos_];

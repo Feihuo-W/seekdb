@@ -100,7 +100,10 @@ uint64_t Utf8CodePoints(const std::string& s) {
   return n;
 }
 
-bool ParseVecText(const std::string& text, std::vector<double>* out) {
+// 解析向量文本（形如 "[1,2,3]"），直接产出 float32。
+// 与旧实现等价（旧版先产出 double 数组再逐个转 float32），但省掉了中间
+// double 向量的分配与拷贝——实测这是写入期与查询期都在付的固定开销。
+bool ParseVecText(const std::string& text, std::vector<float>* out) {
   size_t i = 0;
   auto skip = [&]() {
     while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
@@ -124,7 +127,7 @@ bool ParseVecText(const std::string& text, std::vector<double>* out) {
       next = endp;
     }
     i = static_cast<size_t>(next - text.c_str());
-    out->push_back(v);
+    out->push_back(static_cast<float>(v));
     skip();
     if (i < text.size() && text[i] == ',') {
       ++i;
@@ -626,37 +629,50 @@ bool Engine::BindLiteral(const Column& col, const Literal& lit, ColumnValue* out
       out->s = lit.s;
       return true;
     case ColumnType::VECTOR: {
-      std::vector<double> nums;
       if (lit.kind == LitKind::Vec) {
-        nums = lit.nums;
-      } else if (lit.kind == LitKind::Str) {
-        if (!ParseVecText(lit.s, &nums)) {
+        // 词法器解析出的数值序列（double）
+        if (lit.nums.size() != col.type.param) {
+          err = "dimension_mismatch";
+          return false;
+        }
+        out->v.resize(lit.nums.size());
+        for (size_t i = 0; i < lit.nums.size(); ++i) {
+          double d = lit.nums[i];
+          if (!std::isfinite(d)) {
+            err = "invalid_vector";
+            return false;
+          }
+          float f = static_cast<float>(d);
+          if (!std::isfinite(f)) {
+            err = "invalid_vector";
+            return false;
+          }
+          out->v[i] = f;
+        }
+        return true;
+      }
+      if (lit.kind == LitKind::Str) {
+        // 文本形式 '[...]'（官方负载的写法）：直接解析成 float32，
+        // 不再经过"double 向量 -> float 向量"的中间拷贝。
+        out->v.reserve(col.type.param);  // 避免解析过程中反复扩容
+        if (!ParseVecText(lit.s, &out->v)) {
           err = "invalid_vector";
           return false;
         }
-      } else {
-        err = "type_mismatch";
-        return false;
-      }
-      if (nums.size() != col.type.param) {
-        err = "dimension_mismatch";
-        return false;
-      }
-      out->v.resize(nums.size());
-      for (size_t i = 0; i < nums.size(); ++i) {
-        double d = nums[i];
-        if (!std::isfinite(d)) {
-          err = "invalid_vector";
+        if (out->v.size() != col.type.param) {
+          err = "dimension_mismatch";
           return false;
         }
-        float f = static_cast<float>(d);
-        if (!std::isfinite(f)) {
-          err = "invalid_vector";
-          return false;
+        for (float f : out->v) {
+          if (!std::isfinite(f)) {
+            err = "invalid_vector";
+            return false;
+          }
         }
-        out->v[i] = f;
+        return true;
       }
-      return true;
+      err = "type_mismatch";
+      return false;
     }
   }
   err = "unsupported_sql";
