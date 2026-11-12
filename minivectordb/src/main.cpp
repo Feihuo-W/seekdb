@@ -170,20 +170,20 @@ struct JsonReq {
     // 官方负载的 SQL 基本不含反斜杠，而一条批量 INSERT 的 sql 字段可达 249 KB，
     // 逐字符 push_back 会产生几十万个字符级操作与多次扩容拷贝（实测 ~0.9 ms/请求）。
     {
+      // 快路径：memchr（SIMD）定位收尾引号 + memchr 检查区间里有没有反斜杠。
+      // 官方负载的 sql 字段可达 249 KB，逐字节找引号是写入期最大的一笔纯 CPU 开销。
       const char* seg = p;
-      while (p < end) {
-        unsigned char c = static_cast<unsigned char>(*p);
-        if (c == '"') {
-          out->assign(seg, static_cast<size_t>(p - seg));
-          ++p;
+      const void* hit = memchr(seg, '"', static_cast<size_t>(end - seg));
+      if (hit != nullptr) {
+        const char* q = static_cast<const char*>(hit);
+        const void* esc = memchr(seg, '\\', static_cast<size_t>(q - seg));
+        if (esc == nullptr) {
+          out->assign(seg, static_cast<size_t>(q - seg));
+          p = q + 1;
           return true;
         }
-        if (c < 0x20) return false;
-        if (c == '\\') break;  // 有转义 → 走下面的慢路径
-        ++p;
       }
-      if (p >= end) return false;  // 字符串未闭合
-      p = seg;                   // 有转义：回到起点重走慢路径
+      p = seg;  // 有转义或未闭合：回到起点走逐字符慢路径（语义完全一致）
     }
     out->clear();
     while (p < end) {

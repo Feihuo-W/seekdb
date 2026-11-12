@@ -170,24 +170,23 @@ class Lexer {
     // 逐字符 push_back 会产生十几万次字符级操作与多次扩容拷贝
     // （火焰图实测：写入期 CPU 的 8% 花在 String 的 push_back 上）。
     {
-      size_t scan = pos_;
-      bool simple = true;
-      while (scan < s_.size()) {
-        char c = s_[scan];
-        if (c == '\\') { simple = false; break; }
-        if (c == quote) {
-          // 连续两个引号是转义引号 → 交给慢路径
-          if (scan + 1 < s_.size() && s_[scan + 1] == quote) { simple = false; break; }
-          break;
+      // 快路径：memchr 定位收尾引号 + memchr 检查区间有无反斜杠；
+      // 连续两个引号（转义引号）也交给慢路径。
+      const char* base = s_.data();
+      const size_t total = s_.size();
+      const char* scan = base + pos_;
+      const void* hit = memchr(scan, quote, total - pos_);
+      if (hit != nullptr) {
+        const char* q = static_cast<const char*>(hit);
+        const void* esc = memchr(scan, '\\', static_cast<size_t>(q - scan));
+        const bool doubled = (q + 1 < base + total) && q[1] == quote;
+        if (esc == nullptr && !doubled) {
+          Token t;
+          t.kind = Token::String;
+          t.text.assign(scan, static_cast<size_t>(q - scan));
+          pos_ = static_cast<size_t>(q - base) + 1;
+          return t;
         }
-        ++scan;
-      }
-      if (simple && scan < s_.size() && s_[scan] == quote) {
-        Token t;
-        t.kind = Token::String;
-        t.text.assign(s_.data() + pos_, scan - pos_);
-        pos_ = scan + 1;
-        return t;
       }
     }
     std::string out;
