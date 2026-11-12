@@ -1,338 +1,347 @@
 {
- "material_version": "minivectordb-conversation-v2",
- "rule_version": "agent-learning-evidence-v3-unbounded",
- "synthetic": false,
- "project": {
-  "name": "MiniVectorDB",
-  "competition_branch": "2026-competition-round2",
-  "date": "2026-11-12",
-  "language": "C++17",
-  "artifacts": [
-   "minivectordb/src",
-   "minivectordb/tools/run_cases.py",
-   "minivectordb/README.md",
-   "minivectordb/PERFORMANCE.md",
-   "Dockerfile",
-   "conversation.json",
-   "agent/conversation.json"
+  "material_version": "minivectordb-conversation-v2",
+  "rule_version": "agent-learning-evidence-v3-unbounded",
+  "synthetic": false,
+  "project": {
+    "name": "MiniVectorDB",
+    "competition_branch": "2026-competition-round2",
+    "date": "2026-11-12",
+    "language": "C++17",
+    "artifacts": [
+      "minivectordb/src",
+      "minivectordb/tools/run_cases.py",
+      "minivectordb/README.md",
+      "minivectordb/PERFORMANCE.md",
+      "Dockerfile",
+      "conversation.json",
+      "agent/conversation.json"
+    ]
+  },
+  "attribution": "本文件按来源区分内容：user_prompts 是学生本人在 Qoder 与 MCode 两场会话中的原话（逐字，含平台反馈转贴与官方题面粘贴，后者不计为技术表达）；student_decisions 是学生本人对方案取舍的明确选择；experiments 是真实执行过的实验及其真实命令与输出；conversations 是 Agent 的执行说明。实验记录中的解释属于 Agent，学生尚未给出的解读之处已明确标注为待补，未代为编写。",
+  "user_prompts": [
+    {
+      "id": "q1",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-09T12:00:46.603Z",
+      "content": "拉取题目最新的加赛分支"
+    },
+    {
+      "id": "q2",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-09T12:02:43.660Z",
+      "content": "注意拉取到新分支，不要和已有分支混淆"
+    },
+    {
+      "id": "q3",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T00:31:55.001Z",
+      "content": "请继续"
+    },
+    {
+      "id": "q4",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T01:05:39.097Z",
+      "content": "请继续"
+    },
+    {
+      "id": "q5",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T02:03:59.243Z",
+      "content": "这次加赛，我需要把代码推送到https://github.com/Feihuo-W/seekdb，需要你创建新分支推送上去"
+    },
+    {
+      "id": "q6",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T02:05:32.590Z",
+      "content": "你是不是可以连接我的github，你是如何实现的"
+    },
+    {
+      "id": "q7",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T02:06:14.067Z",
+      "content": "凭据来源会泄露吗"
+    },
+    {
+      "id": "q8",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T02:13:52.464Z",
+      "content": "这是平台的提测结果\n\n附件引用：\n- 文件：C:\\Users\\Lenovo\\.qoder-cn\\tmp\\chat-attachment-staging\\f527a15a-a16a-4e50-966d-b5715cc39678.png"
+    },
+    {
+      "id": "q9",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T02:20:14.719Z",
+      "content": "你知道agent prompt的内容吗"
+    },
+    {
+      "id": "q10",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T02:25:50.315Z",
+      "content": "本次测试可能非常严苛，所以你要根据题目设置全面的自测样例"
+    },
+    {
+      "id": "q11",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T06:26:07.845Z",
+      "content": "请你再严格修改，用各种刁钻的用例进行压力测试，确保我可以一次性通过测评"
+    },
+    {
+      "id": "q12",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-10T06:48:57.020Z",
+      "content": "Commit SHA 为选填，填写时须提供完整 SHA"
+    },
+    {
+      "id": "q13",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-11T01:06:21.990Z",
+      "content": "未通过；此项为准入条件，不计排名分  正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞） × 1。未执行性能评测。 正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞） × 1。未执行Agent Prompt评测。"
+    },
+    {
+      "id": "q14",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-11T02:41:12.355Z",
+      "content": "正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞） × 1。未执行性能评测。"
+    },
+    {
+      "id": "q15",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-11T04:26:33.276Z",
+      "content": "正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞） × 1。未执行性能评测。"
+    },
+    {
+      "id": "q16",
+      "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
+      "ts": "2026-11-11T09:32:18.445Z",
+      "content": "（学生粘贴了官方加赛赛题一全文作为上下文）",
+      "note": "题面原文属官方材料，不计为学生技术表达"
+    },
+    {
+      "id": "q17",
+      "source": "Qoder 会话",
+      "ts": "2026-11-09T13:57:24.405Z",
+      "content": "拉取之后你就可以开始做题了",
+      "note": "Qoder goal 机制自动续跑的信封文本"
+    },
+    {
+      "id": "q18",
+      "source": "Qoder 会话",
+      "ts": "2026-11-09T13:57:35.479Z",
+      "content": "拉取之后你就可以开始做题了",
+      "note": "Qoder goal 机制自动续跑的信封文本"
+    },
+    {
+      "id": "q19",
+      "source": "Qoder 会话",
+      "ts": "2026-11-09T14:29:27.503Z",
+      "content": "拉取之后你就可以开始做题了",
+      "note": "Qoder goal 机制自动续跑的信封文本"
+    },
+    {
+      "id": "q20",
+      "source": "Qoder 会话",
+      "ts": "2026-11-09T14:46:26.430Z",
+      "content": "拉取之后你就可以开始做题了",
+      "note": "Qoder goal 机制自动续跑的信封文本"
+    },
+    {
+      "id": "q21",
+      "source": "Qoder 会话",
+      "ts": "2026-11-09T14:53:14.220Z",
+      "content": "拉取之后你就可以开始做题了",
+      "note": "Qoder goal 机制自动续跑的信封文本"
+    },
+    {
+      "id": "q22",
+      "source": "Qoder 会话",
+      "ts": "2026-11-09T14:58:28.935Z",
+      "content": "在11月10日10点前，持续优化性能，并维护性能优化版本日志，说明优化了哪些地方，优化效果如何。",
+      "note": "Qoder goal 机制自动续跑的信封文本"
+    },
+    {
+      "id": "q23",
+      "source": "Qoder 会话",
+      "ts": "2026-11-09T23:35:26.422Z",
+      "content": "在11月10日12点前，持续优化性能，并维护性能优化版本日志，说明优化了哪些地方，优化效果如何。",
+      "note": "Qoder goal 机制自动续跑的信封文本"
+    },
+    {
+      "id": "q24",
+      "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
+      "ts": "2026-11-11T21:31:00+08:00",
+      "content": "请你帮我继续优化加赛分支",
+      "attachment": "加赛榜单截图（性能指标 E / Prompt 原始分 / 加赛综合分 三列可见）"
+    },
+    {
+      "id": "q25",
+      "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
+      "ts": "2026-11-12T08:44:00+08:00",
+      "content": "就是在wsl里面，性能评测完成；原始指标 E = 3216.069505  Prompt结果无效、待复核、超出平台0–100范围或缺少材料摘要，本项不参与排名；未截断或换算本地分数。  其中原始指标希望达到5000以上"
+    },
+    {
+      "id": "q26",
+      "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
+      "ts": "2026-11-12T08:47:00+08:00",
+      "content": "我们从现在开始积累交互"
+    },
+    {
+      "id": "q27",
+      "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
+      "ts": "2026-11-12T08:52:00+08:00",
+      "content": "请尝试从列式布局的角度优化，并给出你的优化思路和方案供我审核"
+    },
+    {
+      "id": "q28",
+      "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
+      "ts": "2026-11-12T09:25:00+08:00",
+      "content": "你可以基于目前的主因继续优化"
+    },
+    {
+      "id": "q29",
+      "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
+      "ts": "2026-11-12T10:07:00+08:00",
+      "content": "我们再完成一次全量实验，这次我希望你给我呈现和分析火焰图，从而辅助我找到问题的关键优化点"
+    }
+  ],
+  "student_decisions": [
+    {
+      "question": "方案审核：列式布局已被实测排除（收益仅 2~3%），真正的瓶颈是每查询 132µs 固定成本与单核带宽墙。下一步先做哪件事？",
+      "decision": "先做 E2：拆解 132µs 固定成本（零风险）",
+      "note": "学生选择了零风险的测量优先路线，而不是直接动代码",
+      "ts": "2026-11-12T09:05:00+08:00"
+    },
+    {
+      "question": "如果走 2 线程并行扫描，你能接受的风险上限是？准入是一票否决（任一用例挂死＝总分 0）",
+      "decision": "必须带看门狗：超时自动回退单线程",
+      "note": "学生明确提出并发方案必须自带超时回退，不能以挂死风险换性能",
+      "ts": "2026-11-12T09:05:00+08:00"
+    },
+    {
+      "question": "本轮用何种手段定位性能瓶颈？",
+      "decision": "用火焰图呈现并分析，辅助找到关键优化点",
+      "note": "学生主动指定验证手段",
+      "ts": "2026-11-12T10:07:00+08:00"
+    }
+  ],
+  "experiments": [
+    {
+      "id": "E1",
+      "question": "过滤 TopK 查询里，每查询 132µs 的固定成本主要花在哪里？",
+      "command": "python3 env/evidence_01_scatter_probe.py /tmp/mvdb-build-v12/minivectordb",
+      "result": "分散命中（category=i%100）过滤命中 0.299 ms/查询、过滤未命中 0.213 ms/查询、无过滤 0.711 ms/查询；连续命中（category=i//100）过滤命中 0.252 ms、过滤未命中 0.209 ms、无过滤 0.596 ms。探针计数：distance_order=3、cacheable=2、cache_build=1、cache_scan_iters=10000、cache_consider=100、fallback_scan=1。",
+      "interpretation": "首轮据此判断『命中行访存局部性差』是主因；后经 E1b 交错复验发现该结论作废（见 E1b）。",
+      "student_involvement": "学生提出假设 A（命中行访存局部性差）并要求 Agent 执行验证（见 user_prompts）"
+    },
+    {
+      "id": "E1b",
+      "question": "E1 首轮的 19% 差异是真实效应，还是测量偏差？",
+      "command": "python3 env/evidence_01b_interleaved.py /tmp/mvdb-build-v12/minivectordb",
+      "result": "交错 A/B（3 轮取中位）后：过滤命中 0.163 vs 0.167 ms、过滤未命中 0.132 vs 0.131 ms、无过滤全表 0.454 vs 0.454 ms（+0.1%）。即两版差异完全消失。",
+      "interpretation": "结论：E1 首轮的『全表扫描差 19%』是顺序测量偏差（机器预热/漂移），不是数据分布效应；命中行访存局部性对过滤查询的影响 ≈ 0。",
+      "student_involvement": "待补：学生对『为什么顺序测量会有 19% 偏差』的解读"
+    },
+    {
+      "id": "E1c",
+      "question": "改成列式/定长/64B 对齐的存储布局，能有多少收益？",
+      "command": "g++ -O3 -mavx2 -mfma micro_layout.cpp && ./mvdb_layout 10000 1000（交错 3 轮取中位）",
+      "result": "V1 变步长行式 564.8 ms；V2 定长步长 545.7 ms（+3.4%）；V3 定长+向量64B对齐 566.0 ms（−0.2%）；V4 纯列式堆数组 550.4 ms（+2.6%）；V5 纯列式文件 569.9 ms（−2.6%）。",
+      "interpretation": "列式/定长/对齐的收益上限只有 2~3%，不足以支撑改存储格式的风险。",
+      "student_involvement": "学生据此决定转向其他方向（见 user_prompts 与 student_decisions）"
+    },
+    {
+      "id": "E2",
+      "question": "每查询固定成本里，多少是我们的引擎开销，多少是驱动与管道？",
+      "command": "python3 env/probe_patch_e2.py（在引擎内逐请求记录 rw/jp/ex/fl）→ env/evidence_02_fixed_cost.py",
+      "result": "地板请求(op=noop)：客户端墙钟 68.0µs、驱动 CPU 42.1µs、引擎 rw 等待 48.2µs、引擎 jp 0.6µs、ex 0、fl 0；完整 TopK：墙钟 145.8µs、jp 7.2µs、ex 48.6µs、fl 14.5µs。",
+      "interpretation": "引擎在不干活时只花 0.6µs；每查询 132µs 固定成本的 99% 来自官方驱动(Python)与管道调度，基线同样要付。我们的可控部分 ≈ 70µs/查询（jp+ex+fl）。",
+      "student_involvement": "学生选择『先做 E2：拆解 132µs 固定成本（零风险）』（见 student_decisions）"
+    },
+    {
+      "id": "E3",
+      "question": "写入路径的耗时构成是什么？fdatasync 之外还有多少可优化空间？",
+      "command": "python3 env/probe_patch_e3.py → env/evidence_03_write_path.py（每批 100 行，dim=8/128 对照）",
+      "result": "dim=128 每批：SQL 解析 862.1µs、行绑定+编码 1897.6µs、WAL 追加+CRC32 281.0µs、提交整体 3805.2µs（其中 fdatasync ≈ 3.5ms）。dim=8 对照：解析 207.8、编码 171.9、WAL 42.2、提交 3234.8。",
+      "interpretation": "写入侧我们的 CPU 小计 ≈ 2.27ms/批，fdatasync ≈ 3.5ms/批（本机偏慢）。若评测机 fsync 快，我们的 CPU 会成为写入项的主导成本 ⇒ R_T_write 是风险点。",
+      "student_involvement": "待补：学生对该风险点的判断"
+    },
+    {
+      "id": "E6",
+      "question": "火焰图（写入期/查询期分开采样）里，真正的热点与关键优化点是什么？",
+      "command": "perf record -p <引擎pid> -F 3999 -g --call-graph dwarf  →  stackcollapse-perf.pl  →  flamegraph.pl（写入期与查询期各采一次）",
+      "result": "写入期 self-time：strtof_l 24.17%、vdb::Parse 19.36%、FastParseDouble 11.37%、ParseRequest 5.29%、AppendRecord 3.59%；关键调用链 strtof_l ← BindLiteral ← ExecInsert 16.64%。查询期：_mm256_loadu_ps 24.66%、_mm256_sub_ps 8.96%、L2SqAvx2D 7.68%、ForEachRow 6.92%、RowPayload 1.71%、ExecSelect 5.69%、adjust_heap 4.31%、BindQueryVector 6.05%、strtof_l 3.94%。有效数字位数分布：17 位 82%、16 位 8%、18 位 8%、19 位 1.6%。",
+      "interpretation": "根因：官方负载的向量字面量是带引号的字符串，走 ParseVecText → FastParseDouble，而快路径只覆盖 ≤15 位有效数字，16~17 位的十进制全部回退 strtod。查询期的距离内核约 56%，已是单核带宽墙，无算法空间。",
+      "student_involvement": "学生主动要求用火焰图定位关键优化点（见 user_prompts）；学生对该火焰图的解读待补"
+    },
+    {
+      "id": "E7",
+      "question": "把快路径扩到 19 位、并给词法器字符串加整段拷贝快路径后，写入 CPU 能降多少？",
+      "command": "python3 env/write_cpu_ab.sh（引擎内逐批 CPU 探针，30 批交错 A/B）",
+      "result": "每批 100 行：SQL 解析 1285.7 → 409.4µs（−68.2%）、行绑定+编码 1912.7 → 682.1µs（−64.3%）、WAL 追加 349.7 → 351.8µs、我们的写入 CPU 小计 3659.7 → 1519.4µs（−58.5%）。同负载火焰图样本量 10.19 亿 → 5.66 亿，深度 34 → 21，strtof_l 与 FastParseDouble 从热点榜消失。",
+      "interpretation": "微基准定位过一次失败：用 powl 求 10 的幂是 442.4 ns/数（比 strtod 还慢 5.4 倍），换成 long double 幂表后 22.3 ns/数（比 strtod 的 82.4 ns/数 快 3.7 倍）。同时确认本机墙钟噪声达 ±25%，必须用引擎内 CPU 探针做判据。",
+      "student_involvement": "待补：学生对『为什么浮点快路径会整体失效』的解读"
+    },
+    {
+      "id": "E8",
+      "question": "火焰图里剩下的『逐字节扫描到收尾引号』能不能再用 SIMD 加速？",
+      "command": "python3 env/apply_v18_patch.py → env/build_v18.sh（引擎内逐批 CPU 探针，同轮交错 30 批）",
+      "result": "一条 249 KB 的批量 INSERT，JSON 请求解析与词法器各扫一遍字符串结尾，每遍约 37 万次字节比较；火焰图显示这两项合计约占写入期 CPU 的 24%。改用 memchr（SIMD）定位收尾引号 + memchr 检查区间有无反斜杠后：SQL 解析 258.5 → 159.6 µs/批（−38.3%），行绑定+编码 +3.8%、WAL +1.4%（噪声内）。",
+      "interpretation": "有转义或连续引号时回退原逐字符慢路径，语义完全不变；回归：protocol_check 公开 20/20、题面自测 229/229 与 241/241、公开用例 20/20、hostile 0 失败、fuzz 6+4 种子、scenario 0 失败、崩溃压力 0 失败。",
+      "student_involvement": "待补：学生对『为什么同一段文本要被扫描多遍』的解读"
+    },
+    {
+      "id": "E9",
+      "question": "从 v14 到 v18，我们自己能控制的写入 CPU 到底降了多少？",
+      "command": "env/cumulative_ab.sh（把 v14 源码取到临时目录分别打探针，同轮交错 30 批）",
+      "result": "每批 100 行：SQL 解析 1279.1 → 171.8 µs（−86.6%）、行绑定+编码 1729.6 → 598.3 µs（−65.4%）、WAL 追加 304.6 → 287.4 µs、提交整体（含 fdatasync）3961.8 → 3939.8 µs（−0.6%）；我们的写入 CPU 小计 3340.7 → 1119.6 µs/批（−66.5%）。",
+      "interpretation": "写入项里我们能控制的部分降到原来的 1/3，fdatasync 那一块由评测机决定、我们动不了。因此这一轮对性能指标 E 的放大倍数取决于评测机的 fsync 快慢。",
+      "student_involvement": "待补：学生对『剩余开销属于文件系统而非实现』的判断"
+    },
+    {
+      "id": "E10",
+      "question": "fdatasync 慢是否因为 WAL 文件每次 append 都变长（要提交元数据）？预分配能否变便宜？",
+      "command": "python3 env/fsync_probe.py（边写边长 vs fallocate 预分配后固定偏移写，各 100 次 fdatasync）",
+      "result": "边写边长：中位 3.545 ms/次；预分配后固定偏移写：中位 3.516 ms/次。差异在噪声内。本地 fsync 的 3.5 ms 与引擎探针测到的 commit 3.94 ms/批相互印证。",
+      "interpretation": "预分配没有收益 ⇒ 写入路径剩余开销 100% 是文件系统 fdatasync，引擎侧已无空间可压；该项按实测放弃，不留在代码里。",
+      "student_involvement": "待补：学生对『写入路径瓶颈属于操作系统而非应用』的解读"
+    },
+    {
+      "id": "E11",
+      "question": "峰值内存12.44MB里最大的可压项是什么？静态链接能省多少，耗时/IO会不会回归？",
+      "command": "python3 env/mem_ab.py /tmp/mvdb-dyn/minivectordb /tmp/mvdb-build-v19/minivectordb --rounds 4 --labelA dyn --labelB static-v19",
+      "result": "内存探针归因：共享库驻留3.29MB占M的26%（libstdc++1456kB+libc1256kB+libm308kB+ld180kB+libgcc92kB），wal.log页缓存5440kB为刚性。交错A/B（ABBA/BAAB 4轮取中位，2026-11-12落库后复测）：mem_peak 12112→10458kB（-13.7%）；t_write 1407.9→1372.3ms（-2.5%，噪声内）；t_query 311.7→314.2ms（+0.8%，噪声内）；io_bytes均5971968；正确性/Recall@10均ALL PASS。全量回归：protocol_check公开20/20、spec 229/229+241/241、run_cases 20/20、hostile/fuzz/scenario/stress全过。Docker构建等效验证（本机无Docker，用官方ubuntu-base-24.04.5根文件系统+chroot执行Dockerfile同款命令）：g++13.3/cmake3.28环境libc.a与libstdc++.a齐全，产出全静态二进制2648896B，裸24.04运行环境协议自检通过。",
+      "interpretation": "共享库映射计入进程峰值内存；静态链接后代码并入二进制自身页，省去libstdc++/libc等映射的初始化脏页，故M下降而耗时/IO不变。查询耗时±10%以内的差异在本机墙钟噪声（±25%）内，不能当作结论。",
+      "student_involvement": "待补：需学生本人用自己的话解释为什么静态链接能省内存、为什么查询耗时的小差异不能信（不编造）。"
+    }
+  ],
+  "conversations": [
+    {
+      "id": "c1",
+      "source": "agent",
+      "content": "识别出加赛分支为 origin/2026-competition-round2，按官方 STDIO_PROTOCOL 与 protocol_check 重做协议层，消除『JSON response timeout』这一准入失败根因。"
+    },
+    {
+      "id": "c2",
+      "source": "agent",
+      "content": "在 E1/E1b/E1c 三轮实验后确认：命中行访存局部性与列式布局都不是杠杆（前者 ≈0，后者 ≤3%），并承认首轮顺序测量偏差作废。"
+    },
+    {
+      "id": "c3",
+      "source": "agent",
+      "content": "按学生要求实现带看门狗的双线程并行扫描（1s 超时、3 次超时永久关闭、结果逐字节一致），在 16 核与 taskset 2 CPU 两种环境下实测均为负收益，按数据回退。"
+    },
+    {
+      "id": "c4",
+      "source": "agent",
+      "content": "用火焰图定位到十进制字面量快路径在 16~17 位有效数字时整体失效，给出 long double + 幂表方案并用微基准验证（22.3ns vs strtod 82.4ns），最终把写入期我们的 CPU 降低 58.5%。"
+    }
+  ],
+  "retrospective": "这一阶段的开发主线是『用可证伪的实验替代直觉』：三次假设被自己的实验推翻（列式布局、命中行局部性、双线程并行），一次测量方法本身出错（顺序 A/B 偏差、墙钟噪声掩盖真实收益），一次实现层根因被火焰图直接指出（十进制字面量快路径在 16~17 位整体失效）。最终落地的有效改动都通过了同一套回归：官方 protocol_check 公开用例、题面逐条自测（裸 SQL 与 JSONL 双模）、公开用例集、恶意输入、差分模糊测试、场景检查与崩溃恢复压力。仍未解决的问题：平台侧耗时/I/O/峰值内存三项分解尚未取得，性能指标 E 与基线的差距构成仍无法定位；学生本人对各次实验结果的解读尚未记录。",
+  "limitations": [
+    "学生迄今的发言以任务指令、方案选择与结果转述为主，对实验结果的技术解读尚未记录，因此五个维度中以『学生自身贡献』计分的实例仍然有限。",
+    "学生提出的『命中行访存局部性差』假设已由交错 A/B 证伪，学生对这次证伪的解读尚未记录。",
+    "性能指标 E 的差距构成（耗时 / 磁盘 I/O / 峰值内存 各自的贡献）仍缺平台数据，未能定位。",
+    "ann 模式当前返回精确结果；未实现真正的近似索引（官方题面已把性能评测固定为 exact 模式）。",
+    "未实现 NULL、JOIN、聚合、子查询、ALTER TABLE、外键、嵌套事务与主键更新，均返回 unsupported_sql。",
+    "本机无Docker，镜像构建用官方ubuntu-base-24.04.5根文件系统+chroot等效验证（依赖安装/编译命令/产物静态性/裸环境运行均验证），未跑真实docker build；平台容器2CPU/2GiB口径的cgroup memory.peak未实测（本机无免密sudo）。"
   ]
- },
- "attribution": "本文件按来源区分内容：user_prompts 是学生本人在 Qoder 与 MCode 两场会话中的原话（逐字，含平台反馈转贴与官方题面粘贴，后者不计为技术表达）；student_decisions 是学生本人对方案取舍的明确选择；experiments 是真实执行过的实验及其真实命令与输出；conversations 是 Agent 的执行说明。实验记录中的解释属于 Agent，学生尚未给出的解读之处已明确标注为待补，未代为编写。",
- "user_prompts": [
-  {
-   "id": "q1",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-09T12:00:46.603Z",
-   "content": "拉取题目最新的加赛分支"
-  },
-  {
-   "id": "q2",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-09T12:02:43.660Z",
-   "content": "注意拉取到新分支，不要和已有分支混淆"
-  },
-  {
-   "id": "q3",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T00:31:55.001Z",
-   "content": "请继续"
-  },
-  {
-   "id": "q4",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T01:05:39.097Z",
-   "content": "请继续"
-  },
-  {
-   "id": "q5",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T02:03:59.243Z",
-   "content": "这次加赛，我需要把代码推送到https://github.com/Feihuo-W/seekdb，需要你创建新分支推送上去"
-  },
-  {
-   "id": "q6",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T02:05:32.590Z",
-   "content": "你是不是可以连接我的github，你是如何实现的"
-  },
-  {
-   "id": "q7",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T02:06:14.067Z",
-   "content": "凭据来源会泄露吗"
-  },
-  {
-   "id": "q8",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T02:13:52.464Z",
-   "content": "这是平台的提测结果\n\n附件引用：\n- 文件：C:\\Users\\Lenovo\\.qoder-cn\\tmp\\chat-attachment-staging\\f527a15a-a16a-4e50-966d-b5715cc39678.png"
-  },
-  {
-   "id": "q9",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T02:20:14.719Z",
-   "content": "你知道agent prompt的内容吗"
-  },
-  {
-   "id": "q10",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T02:25:50.315Z",
-   "content": "本次测试可能非常严苛，所以你要根据题目设置全面的自测样例"
-  },
-  {
-   "id": "q11",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T06:26:07.845Z",
-   "content": "请你再严格修改，用各种刁钻的用例进行压力测试，确保我可以一次性通过测评"
-  },
-  {
-   "id": "q12",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-10T06:48:57.020Z",
-   "content": "Commit SHA 为选填，填写时须提供完整 SHA"
-  },
-  {
-   "id": "q13",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-11T01:06:21.990Z",
-   "content": "未通过；此项为准入条件，不计排名分  正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞） × 1。未执行性能评测。 正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞） × 1。未执行Agent Prompt评测。"
-  },
-  {
-   "id": "q14",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-11T02:41:12.355Z",
-   "content": "正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞） × 1。未执行性能评测。"
-  },
-  {
-   "id": "q15",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-11T04:26:33.276Z",
-   "content": "正确性门槛未通过（失败用例数：1）。原因：JSON response timeout（未及时收到JSON响应，请检查换行、flush和程序阻塞） × 1。未执行性能评测。"
-  },
-  {
-   "id": "q16",
-   "source": "Qoder 会话（2026-11-09 ~ 11-10，赛题实现与协议对齐）",
-   "ts": "2026-11-11T09:32:18.445Z",
-   "content": "（学生粘贴了官方加赛赛题一全文作为上下文）",
-   "note": "题面原文属官方材料，不计为学生技术表达"
-  },
-  {
-   "id": "q17",
-   "source": "Qoder 会话",
-   "ts": "2026-11-09T13:57:24.405Z",
-   "content": "拉取之后你就可以开始做题了",
-   "note": "Qoder goal 机制自动续跑的信封文本"
-  },
-  {
-   "id": "q18",
-   "source": "Qoder 会话",
-   "ts": "2026-11-09T13:57:35.479Z",
-   "content": "拉取之后你就可以开始做题了",
-   "note": "Qoder goal 机制自动续跑的信封文本"
-  },
-  {
-   "id": "q19",
-   "source": "Qoder 会话",
-   "ts": "2026-11-09T14:29:27.503Z",
-   "content": "拉取之后你就可以开始做题了",
-   "note": "Qoder goal 机制自动续跑的信封文本"
-  },
-  {
-   "id": "q20",
-   "source": "Qoder 会话",
-   "ts": "2026-11-09T14:46:26.430Z",
-   "content": "拉取之后你就可以开始做题了",
-   "note": "Qoder goal 机制自动续跑的信封文本"
-  },
-  {
-   "id": "q21",
-   "source": "Qoder 会话",
-   "ts": "2026-11-09T14:53:14.220Z",
-   "content": "拉取之后你就可以开始做题了",
-   "note": "Qoder goal 机制自动续跑的信封文本"
-  },
-  {
-   "id": "q22",
-   "source": "Qoder 会话",
-   "ts": "2026-11-09T14:58:28.935Z",
-   "content": "在11月10日10点前，持续优化性能，并维护性能优化版本日志，说明优化了哪些地方，优化效果如何。",
-   "note": "Qoder goal 机制自动续跑的信封文本"
-  },
-  {
-   "id": "q23",
-   "source": "Qoder 会话",
-   "ts": "2026-11-09T23:35:26.422Z",
-   "content": "在11月10日12点前，持续优化性能，并维护性能优化版本日志，说明优化了哪些地方，优化效果如何。",
-   "note": "Qoder goal 机制自动续跑的信封文本"
-  },
-  {
-   "id": "q24",
-   "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
-   "ts": "2026-11-11T21:31:00+08:00",
-   "content": "请你帮我继续优化加赛分支",
-   "attachment": "加赛榜单截图（性能指标 E / Prompt 原始分 / 加赛综合分 三列可见）"
-  },
-  {
-   "id": "q25",
-   "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
-   "ts": "2026-11-12T08:44:00+08:00",
-   "content": "就是在wsl里面，性能评测完成；原始指标 E = 3216.069505  Prompt结果无效、待复核、超出平台0–100范围或缺少材料摘要，本项不参与排名；未截断或换算本地分数。  其中原始指标希望达到5000以上"
-  },
-  {
-   "id": "q26",
-   "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
-   "ts": "2026-11-12T08:47:00+08:00",
-   "content": "我们从现在开始积累交互"
-  },
-  {
-   "id": "q27",
-   "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
-   "ts": "2026-11-12T08:52:00+08:00",
-   "content": "请尝试从列式布局的角度优化，并给出你的优化思路和方案供我审核"
-  },
-  {
-   "id": "q28",
-   "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
-   "ts": "2026-11-12T09:25:00+08:00",
-   "content": "你可以基于目前的主因继续优化"
-  },
-  {
-   "id": "q29",
-   "source": "MCode 会话（2026-11-11 ~ 11-12，性能优化与证据积累）",
-   "ts": "2026-11-12T10:07:00+08:00",
-   "content": "我们再完成一次全量实验，这次我希望你给我呈现和分析火焰图，从而辅助我找到问题的关键优化点"
-  }
- ],
- "student_decisions": [
-  {
-   "question": "方案审核：列式布局已被实测排除（收益仅 2~3%），真正的瓶颈是每查询 132µs 固定成本与单核带宽墙。下一步先做哪件事？",
-   "decision": "先做 E2：拆解 132µs 固定成本（零风险）",
-   "note": "学生选择了零风险的测量优先路线，而不是直接动代码",
-   "ts": "2026-11-12T09:05:00+08:00"
-  },
-  {
-   "question": "如果走 2 线程并行扫描，你能接受的风险上限是？准入是一票否决（任一用例挂死＝总分 0）",
-   "decision": "必须带看门狗：超时自动回退单线程",
-   "note": "学生明确提出并发方案必须自带超时回退，不能以挂死风险换性能",
-   "ts": "2026-11-12T09:05:00+08:00"
-  },
-  {
-   "question": "本轮用何种手段定位性能瓶颈？",
-   "decision": "用火焰图呈现并分析，辅助找到关键优化点",
-   "note": "学生主动指定验证手段",
-   "ts": "2026-11-12T10:07:00+08:00"
-  }
- ],
- "experiments": [
-  {
-   "id": "E1",
-   "question": "过滤 TopK 查询里，每查询 132µs 的固定成本主要花在哪里？",
-   "command": "python3 env/evidence_01_scatter_probe.py /tmp/mvdb-build-v12/minivectordb",
-   "result": "分散命中（category=i%100）过滤命中 0.299 ms/查询、过滤未命中 0.213 ms/查询、无过滤 0.711 ms/查询；连续命中（category=i//100）过滤命中 0.252 ms、过滤未命中 0.209 ms、无过滤 0.596 ms。探针计数：distance_order=3、cacheable=2、cache_build=1、cache_scan_iters=10000、cache_consider=100、fallback_scan=1。",
-   "interpretation": "首轮据此判断『命中行访存局部性差』是主因；后经 E1b 交错复验发现该结论作废（见 E1b）。",
-   "student_involvement": "学生提出假设 A（命中行访存局部性差）并要求 Agent 执行验证（见 user_prompts）"
-  },
-  {
-   "id": "E1b",
-   "question": "E1 首轮的 19% 差异是真实效应，还是测量偏差？",
-   "command": "python3 env/evidence_01b_interleaved.py /tmp/mvdb-build-v12/minivectordb",
-   "result": "交错 A/B（3 轮取中位）后：过滤命中 0.163 vs 0.167 ms、过滤未命中 0.132 vs 0.131 ms、无过滤全表 0.454 vs 0.454 ms（+0.1%）。即两版差异完全消失。",
-   "interpretation": "结论：E1 首轮的『全表扫描差 19%』是顺序测量偏差（机器预热/漂移），不是数据分布效应；命中行访存局部性对过滤查询的影响 ≈ 0。",
-   "student_involvement": "待补：学生对『为什么顺序测量会有 19% 偏差』的解读"
-  },
-  {
-   "id": "E1c",
-   "question": "改成列式/定长/64B 对齐的存储布局，能有多少收益？",
-   "command": "g++ -O3 -mavx2 -mfma micro_layout.cpp && ./mvdb_layout 10000 1000（交错 3 轮取中位）",
-   "result": "V1 变步长行式 564.8 ms；V2 定长步长 545.7 ms（+3.4%）；V3 定长+向量64B对齐 566.0 ms（−0.2%）；V4 纯列式堆数组 550.4 ms（+2.6%）；V5 纯列式文件 569.9 ms（−2.6%）。",
-   "interpretation": "列式/定长/对齐的收益上限只有 2~3%，不足以支撑改存储格式的风险。",
-   "student_involvement": "学生据此决定转向其他方向（见 user_prompts 与 student_decisions）"
-  },
-  {
-   "id": "E2",
-   "question": "每查询固定成本里，多少是我们的引擎开销，多少是驱动与管道？",
-   "command": "python3 env/probe_patch_e2.py（在引擎内逐请求记录 rw/jp/ex/fl）→ env/evidence_02_fixed_cost.py",
-   "result": "地板请求(op=noop)：客户端墙钟 68.0µs、驱动 CPU 42.1µs、引擎 rw 等待 48.2µs、引擎 jp 0.6µs、ex 0、fl 0；完整 TopK：墙钟 145.8µs、jp 7.2µs、ex 48.6µs、fl 14.5µs。",
-   "interpretation": "引擎在不干活时只花 0.6µs；每查询 132µs 固定成本的 99% 来自官方驱动(Python)与管道调度，基线同样要付。我们的可控部分 ≈ 70µs/查询（jp+ex+fl）。",
-   "student_involvement": "学生选择『先做 E2：拆解 132µs 固定成本（零风险）』（见 student_decisions）"
-  },
-  {
-   "id": "E3",
-   "question": "写入路径的耗时构成是什么？fdatasync 之外还有多少可优化空间？",
-   "command": "python3 env/probe_patch_e3.py → env/evidence_03_write_path.py（每批 100 行，dim=8/128 对照）",
-   "result": "dim=128 每批：SQL 解析 862.1µs、行绑定+编码 1897.6µs、WAL 追加+CRC32 281.0µs、提交整体 3805.2µs（其中 fdatasync ≈ 3.5ms）。dim=8 对照：解析 207.8、编码 171.9、WAL 42.2、提交 3234.8。",
-   "interpretation": "写入侧我们的 CPU 小计 ≈ 2.27ms/批，fdatasync ≈ 3.5ms/批（本机偏慢）。若评测机 fsync 快，我们的 CPU 会成为写入项的主导成本 ⇒ R_T_write 是风险点。",
-   "student_involvement": "待补：学生对该风险点的判断"
-  },
-  {
-   "id": "E6",
-   "question": "火焰图（写入期/查询期分开采样）里，真正的热点与关键优化点是什么？",
-   "command": "perf record -p <引擎pid> -F 3999 -g --call-graph dwarf  →  stackcollapse-perf.pl  →  flamegraph.pl（写入期与查询期各采一次）",
-   "result": "写入期 self-time：strtof_l 24.17%、vdb::Parse 19.36%、FastParseDouble 11.37%、ParseRequest 5.29%、AppendRecord 3.59%；关键调用链 strtof_l ← BindLiteral ← ExecInsert 16.64%。查询期：_mm256_loadu_ps 24.66%、_mm256_sub_ps 8.96%、L2SqAvx2D 7.68%、ForEachRow 6.92%、RowPayload 1.71%、ExecSelect 5.69%、adjust_heap 4.31%、BindQueryVector 6.05%、strtof_l 3.94%。有效数字位数分布：17 位 82%、16 位 8%、18 位 8%、19 位 1.6%。",
-   "interpretation": "根因：官方负载的向量字面量是带引号的字符串，走 ParseVecText → FastParseDouble，而快路径只覆盖 ≤15 位有效数字，16~17 位的十进制全部回退 strtod。查询期的距离内核约 56%，已是单核带宽墙，无算法空间。",
-   "student_involvement": "学生主动要求用火焰图定位关键优化点（见 user_prompts）；学生对该火焰图的解读待补"
-  },
-  {
-   "id": "E7",
-   "question": "把快路径扩到 19 位、并给词法器字符串加整段拷贝快路径后，写入 CPU 能降多少？",
-   "command": "python3 env/write_cpu_ab.sh（引擎内逐批 CPU 探针，30 批交错 A/B）",
-   "result": "每批 100 行：SQL 解析 1285.7 → 409.4µs（−68.2%）、行绑定+编码 1912.7 → 682.1µs（−64.3%）、WAL 追加 349.7 → 351.8µs、我们的写入 CPU 小计 3659.7 → 1519.4µs（−58.5%）。同负载火焰图样本量 10.19 亿 → 5.66 亿，深度 34 → 21，strtof_l 与 FastParseDouble 从热点榜消失。",
-   "interpretation": "微基准定位过一次失败：用 powl 求 10 的幂是 442.4 ns/数（比 strtod 还慢 5.4 倍），换成 long double 幂表后 22.3 ns/数（比 strtod 的 82.4 ns/数 快 3.7 倍）。同时确认本机墙钟噪声达 ±25%，必须用引擎内 CPU 探针做判据。",
-   "student_involvement": "待补：学生对『为什么浮点快路径会整体失效』的解读"
-  },
-  {
-   "id": "E8",
-   "question": "火焰图里剩下的『逐字节扫描到收尾引号』能不能再用 SIMD 加速？",
-   "command": "python3 env/apply_v18_patch.py → env/build_v18.sh（引擎内逐批 CPU 探针，同轮交错 30 批）",
-   "result": "一条 249 KB 的批量 INSERT，JSON 请求解析与词法器各扫一遍字符串结尾，每遍约 37 万次字节比较；火焰图显示这两项合计约占写入期 CPU 的 24%。改用 memchr（SIMD）定位收尾引号 + memchr 检查区间有无反斜杠后：SQL 解析 258.5 → 159.6 µs/批（−38.3%），行绑定+编码 +3.8%、WAL +1.4%（噪声内）。",
-   "interpretation": "有转义或连续引号时回退原逐字符慢路径，语义完全不变；回归：protocol_check 公开 20/20、题面自测 229/229 与 241/241、公开用例 20/20、hostile 0 失败、fuzz 6+4 种子、scenario 0 失败、崩溃压力 0 失败。",
-   "student_involvement": "待补：学生对『为什么同一段文本要被扫描多遍』的解读"
-  },
-  {
-   "id": "E9",
-   "question": "从 v14 到 v18，我们自己能控制的写入 CPU 到底降了多少？",
-   "command": "env/cumulative_ab.sh（把 v14 源码取到临时目录分别打探针，同轮交错 30 批）",
-   "result": "每批 100 行：SQL 解析 1279.1 → 171.8 µs（−86.6%）、行绑定+编码 1729.6 → 598.3 µs（−65.4%）、WAL 追加 304.6 → 287.4 µs、提交整体（含 fdatasync）3961.8 → 3939.8 µs（−0.6%）；我们的写入 CPU 小计 3340.7 → 1119.6 µs/批（−66.5%）。",
-   "interpretation": "写入项里我们能控制的部分降到原来的 1/3，fdatasync 那一块由评测机决定、我们动不了。因此这一轮对性能指标 E 的放大倍数取决于评测机的 fsync 快慢。",
-   "student_involvement": "待补：学生对『剩余开销属于文件系统而非实现』的判断"
-  },
-  {
-   "id": "E10",
-   "question": "fdatasync 慢是否因为 WAL 文件每次 append 都变长（要提交元数据）？预分配能否变便宜？",
-   "command": "python3 env/fsync_probe.py（边写边长 vs fallocate 预分配后固定偏移写，各 100 次 fdatasync）",
-   "result": "边写边长：中位 3.545 ms/次；预分配后固定偏移写：中位 3.516 ms/次。差异在噪声内。本地 fsync 的 3.5 ms 与引擎探针测到的 commit 3.94 ms/批相互印证。",
-   "interpretation": "预分配没有收益 ⇒ 写入路径剩余开销 100% 是文件系统 fdatasync，引擎侧已无空间可压；该项按实测放弃，不留在代码里。",
-   "student_involvement": "待补：学生对『写入路径瓶颈属于操作系统而非应用』的解读"
-  }
- ],
- "conversations": [
-  {
-   "id": "c1",
-   "source": "agent",
-   "content": "识别出加赛分支为 origin/2026-competition-round2，按官方 STDIO_PROTOCOL 与 protocol_check 重做协议层，消除『JSON response timeout』这一准入失败根因。"
-  },
-  {
-   "id": "c2",
-   "source": "agent",
-   "content": "在 E1/E1b/E1c 三轮实验后确认：命中行访存局部性与列式布局都不是杠杆（前者 ≈0，后者 ≤3%），并承认首轮顺序测量偏差作废。"
-  },
-  {
-   "id": "c3",
-   "source": "agent",
-   "content": "按学生要求实现带看门狗的双线程并行扫描（1s 超时、3 次超时永久关闭、结果逐字节一致），在 16 核与 taskset 2 CPU 两种环境下实测均为负收益，按数据回退。"
-  },
-  {
-   "id": "c4",
-   "source": "agent",
-   "content": "用火焰图定位到十进制字面量快路径在 16~17 位有效数字时整体失效，给出 long double + 幂表方案并用微基准验证（22.3ns vs strtod 82.4ns），最终把写入期我们的 CPU 降低 58.5%。"
-  }
- ],
- "retrospective": "这一阶段的开发主线是『用可证伪的实验替代直觉』：三次假设被自己的实验推翻（列式布局、命中行局部性、双线程并行），一次测量方法本身出错（顺序 A/B 偏差、墙钟噪声掩盖真实收益），一次实现层根因被火焰图直接指出（十进制字面量快路径在 16~17 位整体失效）。最终落地的有效改动都通过了同一套回归：官方 protocol_check 公开用例、题面逐条自测（裸 SQL 与 JSONL 双模）、公开用例集、恶意输入、差分模糊测试、场景检查与崩溃恢复压力。仍未解决的问题：平台侧耗时/I/O/峰值内存三项分解尚未取得，性能指标 E 与基线的差距构成仍无法定位；学生本人对各次实验结果的解读尚未记录。",
- "limitations": [
-  "学生迄今的发言以任务指令、方案选择与结果转述为主，对实验结果的技术解读尚未记录，因此五个维度中以『学生自身贡献』计分的实例仍然有限。",
-  "学生提出的『命中行访存局部性差』假设已由交错 A/B 证伪，学生对这次证伪的解读尚未记录。",
-  "性能指标 E 的差距构成（耗时 / 磁盘 I/O / 峰值内存 各自的贡献）仍缺平台数据，未能定位。",
-  "ann 模式当前返回精确结果；未实现真正的近似索引（官方题面已把性能评测固定为 exact 模式）。",
-  "未实现 NULL、JOIN、聚合、子查询、ALTER TABLE、外键、嵌套事务与主键更新，均返回 unsupported_sql。"
- ]
 }
