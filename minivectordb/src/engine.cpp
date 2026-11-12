@@ -680,6 +680,8 @@ void Engine::EnsureScan(const TableState& t) const {
   t.cache_ids.clear();
   t.cache_dict.clear();
   t.cache_int.clear();
+  t.cache_lists.clear();
+  t.cache_int_lists.clear();
   t.scan_dirty = false;
 }
 
@@ -838,10 +840,14 @@ __attribute__((target("avx2,fma"))) float L2SqAvx2(const float* a, const float* 
     a0 = _mm256_fmadd_ps(d, d, a0);
   }
   __m256 s = _mm256_add_ps(_mm256_add_ps(a0, a1), _mm256_add_ps(a2, a3));
-  float lanes[8];
-  _mm256_storeu_ps(lanes, s);
-  float sum = ((lanes[0] + lanes[1]) + (lanes[2] + lanes[3])) +
-              ((lanes[4] + lanes[5]) + (lanes[6] + lanes[7]));
+  // 横向求和：原先用 store 到栈数组再逐个标量相加，会引入 store-forwarding 停顿
+  // （实测每行多花十几个周期）。改用 hadd 指令链，全程留在寄存器里。
+  __m256 h = _mm256_hadd_ps(s, s);          // [s0+s1, s2+s3, s4+s5, s6+s7, ...]
+  __m256 l = _mm256_hadd_ps(h, h);          // [s0..s3, s4..s7, ...]
+  __m128 lo = _mm256_castps256_ps128(l);    // l[0] = s0+s1+s2+s3
+  __m128 hi = _mm256_extractf128_ps(l, 1);  // hi[1] = l[5] = s4+s5+s6+s7
+  __m128 hi1 = _mm_shuffle_ps(hi, hi, _MM_SHUFFLE(1, 1, 1, 1));
+  float sum = _mm_cvtss_f32(_mm_add_ss(lo, hi1));
   for (; i < dim; ++i) {
     float d = a[i] - b[i];
     sum += d * d;
@@ -850,19 +856,40 @@ __attribute__((target("avx2,fma"))) float L2SqAvx2(const float* a, const float* 
 }
 #endif
 
-}  // namespace
-
-double Engine::L2Squared(const float* a, const float* b, int dim) const {
-#if defined(__x86_64__)
-  static const bool avx2 = __builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma");
-  if (avx2) return static_cast<double>(L2SqAvx2(a, b, dim));
-#endif
+// 标量回退：保持原来的 double 累加语义（非 AVX2 机器上结果不变）。
+double L2SqScalar(const float* a, const float* b, int dim) {
   double sum = 0.0;
   for (int i = 0; i < dim; ++i) {
     double d = static_cast<double>(a[i]) - static_cast<double>(b[i]);
     sum += d * d;
   }
   return sum;
+}
+
+#if defined(__x86_64__)
+__attribute__((target("avx2,fma"))) double L2SqAvx2D(const float* a, const float* b, int dim) {
+  return static_cast<double>(L2SqAvx2(a, b, dim));
+}
+#endif
+
+// 距离计算分派：原先每次调用都要经过函数内 static 守卫检查（线程安全初始化
+// 守卫），热路径每行多一次原子读+分支。这里在静态初始化期解析一次，
+// 热路径只保留一次间接调用。
+using L2Fn = double (*)(const float*, const float*, int);
+
+L2Fn ResolveL2Fn() {
+#if defined(__x86_64__)
+  if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) return &L2SqAvx2D;
+#endif
+  return &L2SqScalar;
+}
+
+const L2Fn g_l2_fn = ResolveL2Fn();
+
+}  // namespace
+
+double Engine::L2Squared(const float* a, const float* b, int dim) const {
+  return g_l2_fn(a, b, dim);
 }
 
 bool Engine::CommitOverlay() {
@@ -1389,8 +1416,10 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     const uint32_t vec_off = s.fixed_off[dist_col];
     const float* qptr = query_vec.data();
     const int qdim = static_cast<int>(query_vec.size());
+    // 热路径直接用已解析好的函数指针，避免每行再过一次成员函数与守卫检查。
+    const L2Fn l2fn = g_l2_fn;
     auto consider = [&](int64_t pk, const RowView& v) {
-      double dist = L2Squared(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
+      double dist = l2fn(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
       if (heap.size() < k_candidates) {
         heap.push(SortRef{pk, dist, v});
       } else {
@@ -1419,6 +1448,8 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
         t->cache_ids.clear();
         t->cache_dict.clear();
         t->cache_int.clear();
+        t->cache_lists.clear();
+        t->cache_int_lists.clear();
         size_t n = t->scan.size();
         if (is_str) {
           t->cache_ids.assign(n, 0);
@@ -1438,6 +1469,7 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
               id = it->second;
             }
             t->cache_ids[i] = id;
+            t->cache_lists[id].push_back(static_cast<uint32_t>(i));
           }
         } else {
           t->cache_int.assign(n, 0);
@@ -1446,7 +1478,10 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
             v.s = &s;
             const uint8_t* p = nullptr;
             uint32_t l = 0;
-            if (ColAt(v, s, cb.col, &p, &l)) t->cache_int[i] = GetI64(p);
+            if (ColAt(v, s, cb.col, &p, &l)) {
+              t->cache_int[i] = GetI64(p);
+              t->cache_int_lists[t->cache_int[i]].push_back(static_cast<uint32_t>(i));
+            }
           }
         }
       }
@@ -1458,13 +1493,24 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
         if (want_found) want_id = it->second;
       }
       if (!is_str || want_found) {
-        for (size_t i = 0; i < t->scan.size(); ++i) {
-          bool match = is_str ? (t->cache_ids[i] == want_id) : (t->cache_int[i] == cb.ival);
-          if (!match) continue;
-          RowView v = MakeView(t->scan[i].second);
-          v.s = &s;
-          if (!v.Valid()) continue;
-          consider(t->scan[i].first, v);
+        // 倒排索引：只遍历命中行（原先每个过滤查询都要扫一遍全部行的缓存条目）。
+        const std::vector<uint32_t>* hit = nullptr;
+        if (is_str) {
+          auto lit = t->cache_lists.find(want_id);
+          if (lit != t->cache_lists.end()) hit = &lit->second;
+        } else {
+          auto lit = t->cache_int_lists.find(cb.ival);
+          if (lit != t->cache_int_lists.end()) hit = &lit->second;
+        }
+        if (hit != nullptr) {
+          const std::vector<uint32_t>& hit_rows = *hit;
+          for (size_t j = 0; j < hit_rows.size(); ++j) {
+            const uint32_t i = hit_rows[j];
+            RowView v = MakeView(t->scan[i].second);
+            v.s = &s;
+            if (!v.Valid()) continue;
+            consider(t->scan[i].first, v);
+          }
         }
       }
     } else if (k_candidates > 0) {

@@ -84,6 +84,10 @@ class Engine {
     mutable std::vector<uint32_t> cache_ids;
     mutable std::unordered_map<std::string, uint32_t> cache_dict;
     mutable std::vector<int64_t> cache_int;
+    // 倒排索引：值 id → 命中的行下标。过滤查询据此只遍历命中行，
+    // 不必每次扫描整列缓存（原先每个过滤查询要扫一遍全部行条目）。
+    mutable std::unordered_map<uint32_t, std::vector<uint32_t>> cache_lists;
+    mutable std::unordered_map<int64_t, std::vector<uint32_t>> cache_int_lists;
   };
   struct OverlayRow {
     bool del = false;
