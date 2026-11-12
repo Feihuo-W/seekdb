@@ -279,6 +279,14 @@
    "result": "每批 100 行：SQL 解析 1285.7 → 409.4µs（−68.2%）、行绑定+编码 1912.7 → 682.1µs（−64.3%）、WAL 追加 349.7 → 351.8µs、我们的写入 CPU 小计 3659.7 → 1519.4µs（−58.5%）。同负载火焰图样本量 10.19 亿 → 5.66 亿，深度 34 → 21，strtof_l 与 FastParseDouble 从热点榜消失。",
    "interpretation": "微基准定位过一次失败：用 powl 求 10 的幂是 442.4 ns/数（比 strtod 还慢 5.4 倍），换成 long double 幂表后 22.3 ns/数（比 strtod 的 82.4 ns/数 快 3.7 倍）。同时确认本机墙钟噪声达 ±25%，必须用引擎内 CPU 探针做判据。",
    "student_involvement": "待补：学生对『为什么浮点快路径会整体失效』的解读"
+  },
+  {
+   "id": "E8",
+   "question": "火焰图里剩下的『逐字节扫描到收尾引号』能不能再用 SIMD 加速？",
+   "command": "python3 env/apply_v18_patch.py → env/build_v18.sh（引擎内逐批 CPU 探针，同轮交错 30 批）",
+   "result": "一条 249 KB 的批量 INSERT，JSON 请求解析与词法器各扫一遍字符串结尾，每遍约 37 万次字节比较；火焰图显示这两项合计约占写入期 CPU 的 24%。改用 memchr（SIMD）定位收尾引号 + memchr 检查区间有无反斜杠后：SQL 解析 258.5 → 159.6 µs/批（−38.3%），行绑定+编码 +3.8%、WAL +1.4%（噪声内）。",
+   "interpretation": "有转义或连续引号时回退原逐字符慢路径，语义完全不变；回归：protocol_check 公开 20/20、题面自测 229/229 与 241/241、公开用例 20/20、hostile 0 失败、fuzz 6+4 种子、scenario 0 失败、崩溃压力 0 失败。",
+   "student_involvement": "待补：学生对『为什么同一段文本要被扫描多遍』的解读"
   }
  ],
  "conversations": [
