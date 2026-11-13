@@ -10975,5 +10975,18 @@
     "info_cn": "",
     "background_cn": "",
     "ref_url": ""
+  },
+  "enable_file_sql": {
+    "id": 10754,
+    "name": "enable_file_sql",
+    "default_value": "0",
+    "base_value": "0",
+    "data_type": "bool",
+    "info": "enable reading local csv/json/parquet files as tables",
+    "flags": "SESSION | INFLUENCE_PLAN",
+    "publish_version": "1.0.0.0",
+    "info_cn": "开启后可直接用 read_csv/read_json/read_parquet 查询本地文件",
+    "background_cn": "文件即数据库功能默认关闭，开启后仍受 secure_file_priv 限制",
+    "ref_url": ""
   }
 }

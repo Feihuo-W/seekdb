@@ -207,6 +207,8 @@ public:
                                   TableItem *&table_item);
   int resolve_json_table_item(const ParseNode &table_node,
                               TableItem *&table_item);
+  int resolve_file_table_item(const ParseNode &table_node,
+                              TableItem *&table_item);
   int resolve_unnest_item(const ParseNode &table_node, TableItem *&table_item);
   int create_unnest_table_item(TableItem *&table_item, ObString table_name);
   int unnest_table_add_column(TableItem *&table_item, ColumnItem *&col_item, ObString col_name);
@@ -613,6 +615,14 @@ protected:
                                          ColumnItem *&col_item);
   int resolve_json_table_column_all_items(const TableItem &table_item,
                                           ObIArray<ColumnItem> &col_items);
+  int resolve_file_table_column_item(const TableItem &table_item,
+                                     const ObString &column_name,
+                                     ColumnItem *&col_item);
+  int resolve_file_table_column_all_items(const TableItem &table_item,
+                                          ObIArray<ColumnItem> &col_items);
+  int generate_file_table_column_item(TableItem *table_item,
+                                      const int64_t column_index,
+                                      ColumnItem *&col_item);
 
   int resolve_function_table_column_item(const TableItem &table_item,
                                          ObIArray<ColumnItem> &col_items);

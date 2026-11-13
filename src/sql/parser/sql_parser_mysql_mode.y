@@ -299,6 +299,7 @@ END_P SET_VAR DELIMITER
         INVISIBLE MERGE ISNULL INTERSECT INCREMENTAL INNER_PARSE ILOGCACHE INPUT INDEXED INCONSISTENT INDIVIDUAL
 
         JOB JSON JSON_ARRAYAGG JSON_OBJECTAGG JSON_QUERY JSON_VALUE JSON_TABLE
+        READ_CSV READ_JSON READ_NDJSON READ_PARQUET READ_GLOB
 
         KEYWORD KEY_BLOCK_SIZE KEY_VERSION KVCACHE
 
@@ -497,7 +498,7 @@ END_P SET_VAR DELIMITER
 %type <node> dynamic_sampling_hint
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
-%type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
+%type <node> json_table_expr unnest_expr file_table_expr file_table_func mock_jt_on_error_on_empty jt_column_list json_table_column_def
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
 %type <node> table_values_clause table_values_clause_with_order_by_and_limit values_row_list row_value
@@ -10835,6 +10836,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 | '(' table_references ')'
 {
   $$ = $2;
@@ -16651,6 +16656,50 @@ JSON_TABLE '(' simple_expr ',' literal mock_jt_on_error_on_empty COLUMNS '(' jt_
   if (result->pl_parse_info_.is_pl_parse_ && !result->pl_parse_info_.is_pl_parse_expr_) {
     result->pl_parse_info_.is_forbid_pl_fp_ = true;
   }
+}
+;
+
+/*===========================================================
+*
+*  FILE TABLE (read_csv / read_json / read_ndjson / read_parquet / glob)
+*
+*============================================================*/
+
+file_table_expr:
+file_table_func '(' expr_list ')' relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, $5);
+}
+| file_table_func '(' expr_list ')' AS relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, $6);
+}
+| file_table_func '(' expr_list ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FILE_TABLE_EXPRESSION, 3, $1, $3, NULL);
+}
+;
+
+file_table_func:
+READ_CSV
+{
+  get_non_reserved_node($$, result->malloc_pool_, @1.first_column, @1.last_column);
+}
+| READ_JSON
+{
+  get_non_reserved_node($$, result->malloc_pool_, @1.first_column, @1.last_column);
+}
+| READ_NDJSON
+{
+  get_non_reserved_node($$, result->malloc_pool_, @1.first_column, @1.last_column);
+}
+| READ_PARQUET
+{
+  get_non_reserved_node($$, result->malloc_pool_, @1.first_column, @1.last_column);
+}
+| READ_GLOB
+{
+  get_non_reserved_node($$, result->malloc_pool_, @1.first_column, @1.last_column);
 }
 ;
 

@@ -101,7 +101,43 @@ typedef struct ObJsonTableDef {
   common::ObSEArray<ObString, 16, common::ModulePageAllocator, true> namespace_arr_;
 } ObJsonTableDef;
 
-struct ObValuesTableDef {
+// 文件即数据库：read_csv/read_json/read_parquet 解析出的表定义。
+struct ObFileTableDef
+{
+  enum FileFormat
+  {
+    CSV = 0,
+    JSONL = 1,
+    PARQUET = 2,
+    GLOB = 3
+  };
+  ObFileTableDef()
+      : path_(),
+        format_(CSV),
+        header_(true),
+        sample_size_(-1),
+        file_size_(-1),
+        file_mtime_(0),
+        column_names_(),
+        column_types_(),
+        column_lengths_(),
+        column_nullables_()
+  {
+  }
+  common::ObString path_;
+  int64_t format_;
+  bool header_;
+  int64_t sample_size_;
+  int64_t file_size_;
+  int64_t file_mtime_;
+  common::ObSEArray<common::ObString, 8, common::ModulePageAllocator, true> column_names_;
+  common::ObSEArray<int32_t, 8, common::ModulePageAllocator, true> column_types_;
+  common::ObSEArray<int64_t, 8, common::ModulePageAllocator, true> column_lengths_;
+  common::ObSEArray<int64_t, 8, common::ModulePageAllocator, true> column_nullables_;
+};
+
+struct ObValuesTableDef
+{
   ObValuesTableDef() : start_param_idx_(-1), end_param_idx_(-1), column_cnt_(0), row_cnt_(0),
                        access_type_(ACCESS_EXPR), is_const_(false) {}
   enum TableAccessType {
@@ -153,6 +189,7 @@ struct TableItem
     ddl_schema_version_ = 0;
     ddl_table_id_ = common::OB_INVALID_ID;
     json_table_def_ = nullptr;
+    file_table_def_ = nullptr;
     table_type_ = MAX_TABLE_TYPE;
     values_table_def_ = NULL;
     sample_info_ = nullptr;
@@ -190,6 +227,7 @@ struct TableItem
     JSON_TABLE,
     VALUES_TABLE,
     LATERAL_TABLE,
+    FILE_TABLE,
   };
 
   /**
@@ -223,6 +261,7 @@ struct TableItem
   bool is_joined_table() const { return JOINED_TABLE == type_; }
   bool is_function_table() const { return FUNCTION_TABLE == type_; }
   bool is_json_table() const { return JSON_TABLE == type_; }  // json_table_def_->table_type_ == MulModeTableType::OB_ORA_JSON_TABLE_TYPE
+  bool is_file_table() const { return FILE_TABLE == type_; }
   bool is_values_table() const { return VALUES_TABLE == type_; }//used to mark values statement: values row(1,2), row(3,4);
 
   bool is_lateral_table() const { return LATERAL_TABLE == type_; }
@@ -301,6 +340,8 @@ struct TableItem
   common::ObSEArray<ObExecParamRawExpr*, 4, common::ModulePageAllocator, true> exec_params_;
   // json table
   ObJsonTableDef *json_table_def_;
+  // file table
+  ObFileTableDef *file_table_def_;
   // values table
   ObValuesTableDef *values_table_def_;
   // sample scan infos

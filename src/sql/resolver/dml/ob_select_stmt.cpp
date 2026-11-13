@@ -1043,6 +1043,7 @@ int ObSelectStmt::is_query_deterministic(bool &is_deterministic) const
       } else if (table_item->is_basic_table() ||
                  table_item->is_values_table() ||
                  table_item->is_json_table() ||
+                 table_item->is_file_table() ||
                  table_item->is_function_table() ||
                  table_item->is_fake_cte_table()) {
         /* do nothing */

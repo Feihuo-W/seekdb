@@ -185,6 +185,7 @@ int TableItem::deep_copy(ObIRawExprCopier &expr_copier,
   ddl_schema_version_ = other.ddl_schema_version_;
   ddl_table_id_ = other.ddl_table_id_;
   ref_query_ = other.ref_query_;
+  file_table_def_ = other.file_table_def_;
   SampleInfo *buf = NULL;
   if (is_json_table() 
       && OB_FAIL(deep_copy_json_table_def(*other.json_table_def_, expr_copier, allocator))) {
@@ -1557,6 +1558,7 @@ int ObDMLStmt::formalize_stmt_expr_reference(ObRawExprFactory *expr_factory,
         ret = OB_ERR_UNEXPECTED;
       } else if (table_item->is_function_table() ||
                  table_item->is_json_table() ||
+                 table_item->is_file_table() ||
                  table_item->for_update_ ||
                  table_item->is_values_table()) {
         if (OB_FAIL(set_sharable_expr_reference(*column_item.expr_, ExplicitedRefType::REF_BY_NORMAL))) {
