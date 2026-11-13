@@ -15,7 +15,7 @@ on:
       - '.github/workflows/file_sql_build.yml'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   compile-sql:
@@ -58,6 +58,13 @@ jobs:
           {
             echo '## Compile errors'
             echo '```'
-            grep -E "error:|Error [0-9]+" /tmp/build.log | head -40
+            grep -E "error:|Error [0-9]+" /tmp/build.log | head -60
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          grep -E "error:|Error [0-9]+" /tmp/build.log | head -200 > ci-failure.log || true
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@users.noreply.github.com"
+          git checkout -B ci-logs
+          git add -f ci-failure.log
+          git commit -m "ci: failure log for ${GITHUB_SHA}" || true
+          git push -f origin ci-logs
