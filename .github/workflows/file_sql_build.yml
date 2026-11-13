@@ -48,5 +48,16 @@ jobs:
 
       - name: Build ob_sql_static
         run: |
+          set -o pipefail
           ccache -M 3G || true
-          make -C build_release -j4 ob_sql_static
+          make -C build_release -j4 ob_sql_static 2>&1 | tee /tmp/build.log
+
+      - name: Publish compile errors
+        if: failure()
+        run: |
+          {
+            echo '## Compile errors'
+            echo '```'
+            grep -E "error:|Error [0-9]+" /tmp/build.log | head -40
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
