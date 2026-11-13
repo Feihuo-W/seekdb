@@ -1,0 +1,52 @@
+# Fork-only compile check for the file_sql feature.
+# Upstream SeekDB CI requires the oceanbase repository and self-hosted runners,
+# so this workflow builds the SQL static library on a GitHub-hosted runner to
+# surface compile errors for changed SQL sources.
+name: File SQL Build Check
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [2026-competition]
+    paths:
+      - 'src/sql/**'
+      - 'src/share/**'
+      - 'src/query/**'
+      - '.github/workflows/file_sql_build.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  compile-sql:
+    name: compile sql library
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Free disk space
+        uses: insightsengineering/disk-space-reclaimer@v1
+        with:
+          tools-cache: false
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git wget rpm rpm2cpio cpio make build-essential binutils m4 \
+            libtool-bin libncurses5 python3 zstd ccache
+
+      - name: Init dependencies
+        run: bash build.sh init
+
+      - name: Configure
+        run: bash build.sh release -DOB_USE_CCACHE=ON -DNEED_PARSER_CACHE=OFF
+
+      - name: Build ob_sql_static
+        run: |
+          ccache -M 3G || true
+          make -C build_release -j4 ob_sql_static
