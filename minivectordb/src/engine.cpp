@@ -17,6 +17,7 @@
 #include <queue>
 #include <unordered_set>
 #include <utility>
+#include <type_traits>
 
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -1456,9 +1457,26 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     bool no_overlay = ovit == overlay_.end() || ovit->second.empty();
     std::vector<int8_t> query_codes;
 #ifndef MVDB_DISABLE_SAFE_Q8
-    // Enable only for a broad scan where the compact pass can repay its overhead.
-    if (no_overlay && conds.empty() && k > 0 && qdim >= 16 && qdim <= safe_q8::kMaxDim &&
-        t->rows.size() >= 1024 && t->rows.size() <= safe_q8::kBudget / size_t(qdim) &&
+    // Build only for a broad scan or an already-known large posting list.
+    // A first small filtered query must not pay a full-table quantizer build.
+    bool large_known_posting = false;
+    if (no_overlay && conds.size() == 1 && conds[0].op == CmpOp::EQ && t->cache_col == conds[0].col && !t->scan_dirty) {
+      const auto& condition = conds[0];
+      if (condition.is_str) {
+        const auto key = t->cache_dict.find(condition.sval);
+        if (key != t->cache_dict.end()) {
+          const auto hits = t->cache_lists.find(key->second);
+          large_known_posting = hits != t->cache_lists.end() && hits->second.size() >= 512;
+        }
+      } else {
+        const auto hits = t->cache_int_lists.find(condition.ival);
+        large_known_posting = hits != t->cache_int_lists.end() && hits->second.size() >= 512;
+      }
+    }
+    const bool existing_codes = q8_cache_.ready && q8_cache_.table == s.id &&
+        q8_cache_.dim == qdim && !t->scan_dirty;
+    if (no_overlay && (conds.empty() || (conds.size() == 1 && conds[0].op == CmpOp::EQ && (large_known_posting || (existing_codes && t->cache_col != conds[0].col)))) && k > 0 && qdim >= 16 && qdim <= safe_q8::kMaxDim &&
+        t->rows.size() >= 1024 && t->rows.size() <= safe_q8::kBudget / (size_t(qdim) + 1) &&
         safe_q8::EnvironmentSafe()) {
       EnsureScan(*t);
       if (q8_cache_.table != s.id || q8_cache_.dim != qdim) {
@@ -1467,16 +1485,25 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
         q8_cache_.table = s.id;
         q8_cache_.dim = qdim;
         double maximum = 0.0;
+        std::vector<double> row_maxima;
+        row_maxima.reserve(t->scan.size());
         bool valid = true;
         for (const auto& kv : t->scan) {
           const RowView v = MakeView(kv.second);
           if (!v.Valid() || v.n < size_t(vec_off) + size_t(qdim) * sizeof(float)) { valid = false; break; }
+          double row_max = 0.0;
           for (int j = 0; j < qdim; ++j) {
             float x; std::memcpy(&x, v.p + vec_off + size_t(j) * sizeof(float), sizeof(x));
             if (!std::isfinite(x)) { valid = false; break; }
-            maximum = std::max(maximum, std::fabs(static_cast<double>(x)));
+            row_max = std::max(row_max, std::fabs(static_cast<double>(x)));
           }
           if (!valid) break;
+          row_maxima.push_back(row_max);
+        }
+        if (valid && !row_maxima.empty()) {
+          const size_t pick = (row_maxima.size() - 1) * 95 / 100;
+          std::nth_element(row_maxima.begin(), row_maxima.begin() + pick, row_maxima.end());
+          maximum = row_maxima[pick];
         }
         int exponent = 0;
         if (maximum > 0) { std::frexp(maximum, &exponent); exponent -= 7;
@@ -1484,18 +1511,29 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
         valid = valid && exponent >= -120 && exponent <= 120;
         if (valid) {
           q8_cache_.exponent = exponent;
-          try { q8_cache_.codes.resize(t->scan.size() * size_t(qdim)); }
+          try {
+            q8_cache_.codes.resize(t->scan.size() * size_t(qdim));
+            q8_cache_.valid_rows.assign(t->scan.size(), 1);
+          }
           catch (const std::bad_alloc&) { valid = false; }
           for (size_t i = 0; valid && i < t->scan.size(); ++i) {
             const RowView v = MakeView(t->scan[i].second);
             for (int j = 0; j < qdim; ++j) {
               float x; std::memcpy(&x, v.p + vec_off + size_t(j) * sizeof(float), sizeof(x));
-              if (!safe_q8::Encode(x, exponent, &q8_cache_.codes[i * size_t(qdim) + j])) { valid = false; break; }
+              if (!safe_q8::Encode(x, exponent, &q8_cache_.codes[i * size_t(qdim) + j])) {
+                // Unrepresentable outliers are always exact; never read their codes.
+                q8_cache_.valid_rows[i] = 0;
+                q8_cache_.all_valid = false;
+                break;
+              }
             }
           }
         }
         q8_cache_.ready = valid;
-        if (!valid) std::vector<int8_t>().swap(q8_cache_.codes);
+        if (!valid) {
+          std::vector<int8_t>().swap(q8_cache_.codes);
+          std::vector<uint8_t>().swap(q8_cache_.valid_rows);
+        }
         q8_build_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now() - build_start).count();
       }
@@ -1579,8 +1617,18 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
         }
         if (hit != nullptr) {
           const std::vector<uint32_t>& hit_rows = *hit;
+          // Small posting lists are cheaper to evaluate directly.
+          use_q8 = use_q8 && hit_rows.size() >= 512;
+          const safe_q8::CodeDistance posting_distance = safe_q8::Resolve();
           for (size_t j = 0; j < hit_rows.size(); ++j) {
             const uint32_t i = hit_rows[j];
+            if (use_q8 && (q8_cache_.all_valid || q8_cache_.valid_rows[i])) {
+              ++q8_screened;
+              if (posting_distance(q8_cache_.codes.data() + size_t(i) * qdim, query_codes.data(), qdim) > q8_cutoff) {
+                ++q8_pruned;
+                continue;
+              }
+            }
             RowView v = MakeView(t->scan[i].second);
             v.s = &s;
             if (!v.Valid()) continue;
@@ -1588,16 +1636,30 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
           }
         }
       }
-    } else if (use_q8) {
+    } else if (use_q8 && conds.empty()) {
       const safe_q8::CodeDistance code_distance = safe_q8::Resolve();
-      for (size_t i = 0; i < t->scan.size(); ++i) {
-        ++q8_screened;
-        const uint64_t code_sq = code_distance(q8_cache_.codes.data() + i * size_t(qdim), query_codes.data(), qdim);
-        if (code_sq > q8_cutoff) { ++q8_pruned; continue; }
-        RowView v = MakeView(t->scan[i].second);
-        v.s = &s;
-        if (v.Valid()) consider(t->scan[i].first, v);
-      }
+      // Normal tables avoid an extra per-row metadata read. Exceptional tables
+      // keep explicit tags; invalid code rows always evaluate original values.
+      auto scan_codes = [&](auto all_rows_valid) {
+        for (size_t i = 0; i < t->scan.size(); ++i) {
+          ++q8_screened;
+          if constexpr (!decltype(all_rows_valid)::value) {
+            if (!q8_cache_.valid_rows[i]) {
+              RowView v = MakeView(t->scan[i].second);
+              v.s = &s;
+              if (v.Valid()) consider(t->scan[i].first, v);
+              continue;
+            }
+          }
+          const uint64_t code_sq = code_distance(q8_cache_.codes.data() + i * size_t(qdim), query_codes.data(), qdim);
+          if (code_sq > q8_cutoff) { ++q8_pruned; continue; }
+          RowView v = MakeView(t->scan[i].second);
+          v.s = &s;
+          if (v.Valid()) consider(t->scan[i].first, v);
+        }
+      };
+      if (q8_cache_.all_valid) scan_codes(std::true_type{});
+      else scan_codes(std::false_type{});
     } else if (k_candidates > 0) {
       // The exact TopK scan has no predicates in this branch. Avoid calling
       // the predicate evaluator once per row while preserving scan/order/
@@ -1605,6 +1667,7 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
       if (conds.empty()) {
         ForEachRow(*t, [&](int64_t pk, const RowView& v) { consider(pk, v); });
       } else {
+        use_q8 = false;
         ForEachRow(*t, [&](int64_t pk, const RowView& v) {
           if (!EvalPredicates(conds, v)) return;
           consider(pk, v);

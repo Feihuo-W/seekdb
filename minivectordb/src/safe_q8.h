@@ -20,10 +20,13 @@ struct Cache {
   int dim = 0;
   int exponent = 0;
   bool ready = false;
+  bool all_valid = true;
   std::vector<int8_t> codes;
+  std::vector<uint8_t> valid_rows;
   void Clear() {
-    table = 0; dim = 0; exponent = 0; ready = false;
+    table = 0; dim = 0; exponent = 0; ready = false; all_valid = true;
     std::vector<int8_t>().swap(codes);
+    std::vector<uint8_t>().swap(valid_rows);
   }
 };
 
