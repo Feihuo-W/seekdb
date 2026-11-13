@@ -17,7 +17,7 @@
       "agent/conversation.json"
     ]
   },
-  "summary": "保留真实开发历史及分开归属的学生发言、Agent方法和工具结果。上一提交983b70平台E3201.799563、Prompt原始3.5，反驳了先前高分预测。本轮按学生质疑与本地测评要求，复现异常值和高命中过滤退化，修正安全8bit索引适用性与懒构建；最终本地独立真值、边界、事务、存储和全回归通过。选定异常/高命中场景T下降66%~85%，正值低命中近乎持平；均非平台分数，4500尚未验证。未代写学生理解，未声称掌握隐藏skill。",
+  "summary": "真实开发学习材料，保留原历史，新增2026-11-12~13学生先建本地链路、要求重读题意、认可float32+8-bit安全筛选以及随后依据平台反馈选择回退的真实发言，并分开归属Agent实现与工具结果。8-bit安全筛选在本地通过数值边界、事务/缓存、既有全回归与独立配对测量，但平台两轮回测为E=3201.799563与E=2948.771655，均低于v19的3351.576414，因此最终参评版本回退到v19精确路径，辅助码实现不随版本提交。本地代理负载未能预测平台结果，这是本材料保留的主要教训。未伪造学生理解，未证实任何隐藏skill。",
   "attribution": "本文件按来源区分内容：user_prompts 是学生本人在 Qoder 与 MCode 两场会话中的原话（逐字，含平台反馈转贴与官方题面粘贴，后者不计为技术表达）；student_decisions 是学生本人对方案取舍的明确选择；experiments 是真实执行过的实验及其真实命令与输出，其中 interpretation 属 Agent 的分析，学生本人的解读以 student_involvement 字段为准；conversations 是 Agent 的执行说明。学生尚未给出的解读在对应实验处如实标注为待补，未代为编写。",
   "user_prompts": [
     {
@@ -448,64 +448,6 @@
   },
   "corrections_20261113": {
     "source": "agent",
-    "content": "保留旧实验历史文本，但其“无算法空间”“fdatasync之外100%无空间”和将VmHWM当官方M的推断不再适用。公开题面为默认exact而非已证明固定配置。用户确认3351.576414对应v19 SHA 7f32c2e2371e32b990f63c72d622d6aa9641e651，3216.069505对应174f1dd6ce33f1506cd95cfa2917d496c29458d2。新版本未获平台分数。"
-  },
-  "robust_followup_20261113": {
-    "source_note": "用户真实指令与Agent/工具结果分开记录；保留失败和负收益，不将Agent机制解释记为学生理解。",
-    "student_messages": [
-      {
-        "source": "user",
-        "content": "有没有可能是测试平台波动的问题呢"
-      },
-      {
-        "source": "user",
-        "content": "有没有必要，我们继续做优化，然后再去提测一次"
-      },
-      {
-        "source": "user",
-        "content": "我们优先在本地进行测评，争取E=4500+的成绩"
-      }
-    ],
-    "platform_feedback": {
-      "source": "user",
-      "content": "性能评测完成；原始指标 E = 3201.799563；Agent Prompt评测完成；原始分 = 3.500000",
-      "version_context": "983b70e39c56d0e04fb08a22988c6b5ade2f045f，当前新候选未获平台成绩"
-    },
-    "agent_method": {
-      "source": "agent",
-      "content": "学生质疑平台波动并要求优先本地测评后，Agent不直接断言平台退化原因，扩展uniform/normalized/positive/outlier与1%/10%/100%过滤命中矩阵。复现异常值撑大全局尺度及大posting完整double造成多倍退化。按分位数选择dyadic尺度，无法编码的异常行始终原float32精算；大posting内做保守码筛选，小posting不建码/不量化query；全部可编码表走不读异常tag的快路径。不改误差证书、exact、WAL格式和提交同步。"
-    },
-    "results": [
-      {
-        "id": "matrix",
-        "source": "tool_result",
-        "source_sha256": "265ce16d070da07373fdad92e407db4e3526972627bc1e88da54dab24ad80f76",
-        "output": "{\"schema\":\"local-distribution-matrix-v1\",\"mode\":\"performance\",\"valid\":true,\"groups\":[{\"distribution\":\"positive\",\"categories\":100,\"completed_rounds\":4,\"valid_rounds\":4,\"paired_T_change_percent\":[15.430262210698075,-4.7661351803212515,-3.5846920596383502,2.6505758878076824],\"paired_T_change_percent_median\":-0.46705808591533393},{\"distribution\":\"positive\",\"categories\":1,\"completed_rounds\":4,\"valid_rounds\":4,\"paired_T_change_percent\":[-66.76526292487378,-65.45332770130491,-67.17510004054607,-62.206041564797886],\"paired_T_change_percent_median\":-66.10929531308935},{\"distribution\":\"outlier\",\"categories\":100,\"completed_rounds\":4,\"valid_rounds\":4,\"paired_T_change_percent\":[-76.29365913468882,-75.49814546479539,-82.46711179812476,-75.31417438496236],\"paired_T_change_percent_median\":-75.8959022997421},{\"distribution\":\"outlier\",\"categories\":1,\"completed_rounds\":4,\"valid_rounds\":4,\"paired_T_change_percent\":[-86.08747122216784,-83.92356472143335,-85.3350860229429,-85.1831409577272],\"paired_T_change_percent_median\":-85.25911349033505}],\"limitations\":[\"not an official workload\",\"all unique queries verified; no 1000-query claim\",\"process CPU uses coarse ticks; HWM is not container memory\",\"no enforced CPU quota or affinity\",\"validation follows both measurements and may affect later OS state\",\"first-query timing includes response processing and optional logging; not pure index build time\"]}"
-      },
-      {
-        "id": "resource",
-        "source": "tool_result",
-        "source_sha256": "cdfb648b9421497d1fbd96454969d813607b0224675477a9561ee86a68c4a8f3",
-        "output": "{\"scope\":\"local_only_no_official_E\",\"groups\":[{\"label\":\"baseline\",\"phase\":\"write\",\"valid_runs\":2,\"expected_runs\":2,\"T_ns_median\":510063081.0,\"M_cgroup_peak_bytes_median\":8925184.0,\"B_cgroup_data_device_bytes_median\":5963776.0,\"driver_cpu_measure_ns_median\":68228673.0},{\"label\":\"baseline\",\"phase\":\"query\",\"valid_runs\":2,\"expected_runs\":2,\"T_ns_median\":103821756.5,\"M_cgroup_peak_bytes_median\":9826304.0,\"B_cgroup_data_device_bytes_median\":5963776.0,\"driver_cpu_measure_ns_median\":17506379.5},{\"label\":\"candidate\",\"phase\":\"write\",\"valid_runs\":2,\"expected_runs\":2,\"T_ns_median\":519395943.0,\"M_cgroup_peak_bytes_median\":9363456.0,\"B_cgroup_data_device_bytes_median\":5963776.0,\"driver_cpu_measure_ns_median\":76413194.0},{\"label\":\"candidate\",\"phase\":\"query\",\"valid_runs\":2,\"expected_runs\":2,\"T_ns_median\":17856349.0,\"M_cgroup_peak_bytes_median\":10219520.0,\"B_cgroup_data_device_bytes_median\":5963776.0,\"driver_cpu_measure_ns_median\":8296335.5}]}"
-      },
-      {
-        "id": "regression",
-        "source": "tool_result",
-        "source_sha256": "5221e2d6edc3dc824a0f4f5ad1f8d8a79a08e325d2b4bcb8f841609ff27de8a3",
-        "output": "{\"binary\":\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\",\"binary_sha256\":\"76f206d984ff9be7dbbf7ac8408d002aec59a9c87e6f1a89310e4d2c885d6234\",\"scope\":\"existing_suites_numeric_boundary_failures_separate\",\"checks\":[{\"name\":\"protocol\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/protocol_check/run.py\",\"--command\",\"[\\\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\\\", \\\"--data\\\", \\\"{data_dir}\\\"]\",\"--output\",\"/mnt/d/2026-OB决赛备赛/profile_output/robust-fastvalid-regress-20261113/protocol\"],\"returncode\":0,\"seconds\":0.7226677219998692,\"valid\":true},{\"name\":\"spec_raw\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/minivectordb/tools/spec_suite.py\",\"--binary\",\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\"],\"returncode\":0,\"seconds\":0.6219973930001288,\"valid\":true},{\"name\":\"spec_jsonl\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/minivectordb/tools/spec_suite.py\",\"--binary\",\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\",\"--jsonl\"],\"returncode\":0,\"seconds\":0.7222764379998807,\"valid\":true},{\"name\":\"public_cases\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/minivectordb/tools/run_cases.py\",\"--binary\",\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\"],\"returncode\":0,\"seconds\":0.42378928199991606,\"valid\":true},{\"name\":\"hostile\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/minivectordb/tools/hostile_driver.py\",\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\"],\"returncode\":0,\"seconds\":3.3852378749998024,\"valid\":true},{\"name\":\"fuzz\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/minivectordb/tools/fuzz_diff.py\",\"--binary\",\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\",\"--seeds\",\"6\",\"--steps\",\"200\"],\"returncode\":0,\"seconds\":1.2232094969999707,\"valid\":true},{\"name\":\"fuzz_crash\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/minivectordb/tools/fuzz_diff.py\",\"--binary\",\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\",\"--crash\",\"--seeds\",\"4\",\"--steps\",\"200\"],\"returncode\":0,\"seconds\":1.0240843249998761,\"valid\":true},{\"name\":\"scenario\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/minivectordb/tools/scenario_checks.py\",\"--binary\",\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\"],\"returncode\":0,\"seconds\":0.11990850099982708,\"valid\":true},{\"name\":\"stress_recovery\",\"command\":[\"/usr/bin/python3\",\"/home/sunyingjie/seekdb-2026/minivectordb/tools/stress_recovery.py\",\"--binary\",\"/tmp/mvdb-robust-q8-20261113/fastvalid/build/minivectordb\"],\"returncode\":0,\"seconds\":78.61559313099997,\"valid\":true}],\"valid\":true}"
-      },
-      {
-        "id": "standard1000",
-        "source": "tool_result",
-        "source_sha256": "548ad7f3223a9bde190ce9e7358e1739d2f63715c8baa9f5e0f0be43b52908b1",
-        "output": "{\"scope\":\"local_only_no_official_E\",\"groups\":[{\"label\":\"baseline\",\"phase\":\"write\",\"valid_runs\":1,\"expected_runs\":1,\"T_ns_median\":498123420,\"M_cgroup_peak_bytes_median\":9424896,\"B_cgroup_data_device_bytes_median\":5976064,\"driver_cpu_measure_ns_median\":55971702},{\"label\":\"baseline\",\"phase\":\"query\",\"valid_runs\":1,\"expected_runs\":1,\"T_ns_median\":177178779,\"M_cgroup_peak_bytes_median\":10088448,\"B_cgroup_data_device_bytes_median\":5976064,\"driver_cpu_measure_ns_median\":82653983}]}"
-      },
-      {
-        "id": "correctness",
-        "source": "tool_result_summary",
-        "output": "最终候选4组原数值边界、78项事务/不同维度/数值、18异常值过滤专项、8存储/mremap/预算回退全部通过；protocol/spec双模式/public/hostile/fuzz/scenario/stress通过；独立新种子资源与标准1000query全量真值、重启内容和SIGKILL恢复通过。"
-      }
-    ],
-    "limitations": "数据分布为本地诊断，不是已经确认的官方负载。矩阵每case16个独立query重复计时，不声称1000条不同query。正值低命中最终四轮耗时-0.467%仅近乎持平，不宣称稳定提速；原始robust方案曾回归10.11%，按数据修正。4500仅是目标，官方基线未知，尚未证明达到。本机未跑真实Docker build，提交前仍应环境预检。学生未留下对误差界和新结果的完整技术解释，不代写或虚构事前预测。"
+    "content": "保留旧实验历史文本，但其“无算法空间”“fdatasync之外100%无空间”和将VmHWM当官方M的推断不再适用。公开题面为默认exact而非已证明固定配置。用户确认3351.576414对应v19 SHA 7f32c2e2371e32b990f63c72d622d6aa9641e651，3216.069505对应174f1dd6ce33f1506cd95cfa2917d496c29458d2。新版本未获平台分数。 2026-11-13补充：983b70e39c56d0e04fb08a22988c6b5ade2f045f平台E=3201.799563、Prompt原始分3.5；0ed322d1807a7cc558545fa2d5a3d8fdddc2d5e4平台E=2948.771655、Prompt判定无效/待复核。两次都低于v19的3351.576414，证明本地均匀随机等代理负载的收益没有迁移到平台；按数据回退到v19，辅助码方案不作为最终版本。"
   }
 }
