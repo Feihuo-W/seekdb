@@ -1548,8 +1548,12 @@ int ObSqlParameterization::formalize_fast_parameter_sql(ObIAllocator &allocator,
       || (ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     // do nothing
   } else if (config::_ob_enable_fast_parser()) {
-    if (OB_FAIL(ObFastParser::parse(src_sql, fp_ctx_format, allocator, format_sql_ptr, format_sql_len,
-                                    p_list, param_num, fp_result, fp_result.values_token_pos_))) {
+    int fast_ret = ObFastParser::parse(src_sql, fp_ctx_format, allocator, format_sql_ptr, format_sql_len,
+                                       p_list, param_num, fp_result, fp_result.values_token_pos_);
+    if (OB_ERR_PARSER_SYNTAX == fast_ret) {
+      // Keep the statement usable when the fast parameterizer cannot tokenize it.
+      dest_sql.assign_ptr(src_sql.ptr(), src_sql.length());
+    } else if (OB_FAIL(fast_ret)) {
     } else if (OB_ISNULL(p_list)) {
       dest_sql.assign_ptr(format_sql_ptr, format_sql_len); 
     } else {
@@ -1601,8 +1605,12 @@ int ObSqlParameterization::formalize_sql_filter_hint(ObIAllocator &allocator,
       || (ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     // do nothing
   } else if (config::_ob_enable_fast_parser()) {
-    if (OB_FAIL(ObFastParser::parse(src_sql, fp_ctx, allocator, format_sql_ptr, format_sql_len,
-                                    p_list, param_num, fp_result, fp_result.values_token_pos_))) {
+    int fast_ret = ObFastParser::parse(src_sql, fp_ctx, allocator, format_sql_ptr, format_sql_len,
+                                       p_list, param_num, fp_result, fp_result.values_token_pos_);
+    if (OB_ERR_PARSER_SYNTAX == fast_ret) {
+      // Keep the statement usable when the fast parameterizer cannot tokenize it.
+      dest_sql.assign_ptr(src_sql.ptr(), src_sql.length());
+    } else if (OB_FAIL(fast_ret)) {
     } else if (param_num != raw_params.count()) {
       ret = OB_ERR_UNEXPECTED;
       LOG_WARN("invalid param_num", K(param_num), K(raw_params.count()));
@@ -1644,16 +1652,15 @@ int ObSqlParameterization::fast_parser(ObIAllocator &allocator,
   int64_t no_param_sql_len = 0;
   ParamList *p_list = NULL;
   bool is_call_procedure = false;
+  bool need_full_parser = false;
   bool is_contain_select = (sql.length() > 6 && 0 == STRNCASECMP(sql.ptr(), "select", 6));
   if (!is_contain_select && (!need_fast_parser(sql)
     || (ObParser::is_pl_stmt(sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     (void)fp_result.pc_key_.name_.assign_ptr(sql.ptr(), sql.length());
   } else if (config::_ob_enable_fast_parser()) {
-    if (OB_FAIL(ObFastParser::parse(sql, fp_ctx, allocator, no_param_sql_ptr, no_param_sql_len,
-                                    p_list, param_num, fp_result, fp_result.values_token_pos_))) {
-    }
-
-    if (OB_SUCC(ret)) {
+    int fast_ret = ObFastParser::parse(sql, fp_ctx, allocator, no_param_sql_ptr, no_param_sql_len,
+                                       p_list, param_num, fp_result, fp_result.values_token_pos_);
+    if (OB_SUCCESS == fast_ret) {
       (void)fp_result.pc_key_.name_.assign_ptr(no_param_sql_ptr, no_param_sql_len);
       if (param_num > 0) {
         ObPCParam *pc_param = NULL;
@@ -1673,8 +1680,18 @@ int ObSqlParameterization::fast_parser(ObIAllocator &allocator,
           }
         } // for end
       } else { /*do nothing*/}
+    } else if (OB_ERR_PARSER_SYNTAX == fast_ret) {
+      // The fast parameterizer is a pure optimization. When it cannot tokenize a
+      // statement (for example table functions such as read_csv), fall back to the
+      // regular SQL parser instead of failing the whole statement.
+      need_full_parser = true;
+    } else {
+      ret = fast_ret;
     }
   } else {
+    need_full_parser = true;
+  }
+  if (OB_SUCC(ret) && need_full_parser) {
     ObParser parser(allocator, fp_ctx.sql_mode_, fp_ctx.charsets4parser_);
     SMART_VAR(ParseResult, parse_result) {
       if (OB_FAIL(parser.parse(sql, parse_result, FP_MODE, fp_ctx.enable_batched_multi_stmt_))) {

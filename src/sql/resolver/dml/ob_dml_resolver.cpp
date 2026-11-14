@@ -4152,8 +4152,10 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
     }
 
     // 解析位置参数与命名参数
-    for (int64_t i = 0; OB_SUCC(ret) && i < args_node->num_child_; ++i) {
-      const ParseNode *arg = args_node->children_[i];
+    const int64_t arg_count = (T_EXPR_LIST == args_node->type_) ? args_node->num_child_ : 1;
+    for (int64_t i = 0; OB_SUCC(ret) && i < arg_count; ++i) {
+      const ParseNode *arg = (T_EXPR_LIST == args_node->type_) ? args_node->children_[i]
+                                                               : args_node;
       if (OB_ISNULL(arg)) {
         ret = OB_ERR_UNEXPECTED;
         break;
