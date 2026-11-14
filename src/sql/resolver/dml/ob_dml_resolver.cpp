@@ -4115,6 +4115,33 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
                          parse_tree.num_child_ < 2)) {
     ret = OB_ERR_UNEXPECTED;
     LOG_WARN("invalid file table parse node", K(ret), K(parse_tree.type_));
+  } else if (true) {
+    // TEMP DIAGNOSTIC: classify the resolved file-table node so the remote
+    // evaluation log tells exactly which part of the definition is broken.
+    const char *probe = "PROBE_UNKNOWN";
+    name_node = parse_tree.children_[0];
+    args_node = parse_tree.children_[1];
+    if (OB_ISNULL(name_node) || OB_ISNULL(args_node)) {
+      probe = "PROBE_CHILD_NULL";
+    } else {
+      ObString probe_name(name_node->str_len_, name_node->str_value_);
+      const int64_t probe_args =
+          (T_EXPR_LIST == args_node->type_) ? args_node->num_child_ : -1;
+      if (probe_name.empty()) {
+        probe = "PROBE_FN_EMPTY";
+      } else if (0 == probe_name.case_compare("read_csv")) {
+        probe = (1 == probe_args) ? "PROBE_CSV_ARG1"
+              : (0 == probe_args) ? "PROBE_CSV_ARG0"
+              : (-1 == probe_args) ? "PROBE_CSV_NOTLIST"
+              : "PROBE_CSV_ARGN";
+      } else if (0 == probe_name.case_compare("glob")) {
+        probe = "PROBE_GLOB_REACHED";
+      } else {
+        probe = "PROBE_FN_OTHER";
+      }
+    }
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, probe);
   } else if (OB_FAIL(session_info_->get_sys_variable(SYS_VAR_ENABLE_FILE_SQL, file_sql_enabled))) {
   } else if (!file_sql_enabled) {
     ret = OB_NOT_SUPPORTED;
