@@ -374,12 +374,12 @@ class Parser {
     }
     if (t.kind == Token::String) {
       lit.kind = LitKind::Str;
-      lit.s = Next().text;
+      lit.s = std::move(t_[pos_++].text);
       return lit;
     }
     if (t.kind == Token::Vec) {
       lit.kind = LitKind::Vec;
-      lit.nums = Next().nums;
+      lit.nums = std::move(t_[pos_++].nums);
       return lit;
     }
     if (t.kind == Token::Ident) {

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "sql.h"
+#include "safe_q8.h"
 
 namespace vdb {
 
@@ -194,6 +195,9 @@ class Engine {
   std::map<uint32_t, std::map<int64_t, OverlayRow>> overlay_;
 
   bool ann_ = false;
+
+  // One engine-wide bounded code cache; no additional persisted vector copy.
+  mutable safe_q8::Cache q8_cache_;
 
   // Incremental compaction session state.
   struct CompactRef {

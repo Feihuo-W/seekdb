@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <cmath>
+#include <charconv>
+#include <system_error>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -37,6 +40,31 @@ inline std::string FmtDouble(double v) {
   return buf;
 }
 
+// Standard shortest-roundtrip conversion, independent of locale. Preserve
+// legacy formatting fallback if the toolchain lacks floating-point to_chars.
+inline void AppendRoundtripDouble(std::string& out, double value) {
+#if defined(__GLIBCXX__) && __GNUC__ >= 11
+  char buf[64];
+  const auto result = std::to_chars(buf, buf + sizeof(buf), value, std::chars_format::general);
+  if (result.ec == std::errc{}) { out.append(buf, static_cast<size_t>(result.ptr - buf)); return; }
+#endif
+  out += FmtDouble(value);
+}
+
+// VECTOR values are stored float32. Format the float overload directly so
+// its shortest decimal round-trips to the same float32 without double expansion.
+inline void AppendRoundtripFloat(std::string& out, float value) {
+  // JSON consumers may parse bare -0 as integer zero and lose its sign.
+  if (value == 0.0f && std::signbit(value)) { out.append("-0.0"); return; }
+#if defined(__GLIBCXX__) && __GNUC__ >= 11
+  char buf[64];
+  const auto result = std::to_chars(buf, buf + sizeof(buf), value, std::chars_format::general);
+  if (result.ec == std::errc{}) { out.append(buf, static_cast<size_t>(result.ptr - buf)); return; }
+#endif
+  // Keep legacy fallback for toolchains without floating-point to_chars.
+  out += FmtDouble(static_cast<double>(value));
+}
+
 struct OutVal {
   enum Kind { INT, STR, FLT, VEC } kind = INT;
   int64_t i = 0;
@@ -49,12 +77,12 @@ inline void OutValToJson(std::string& out, const OutVal& v) {
   switch (v.kind) {
     case OutVal::INT: out += std::to_string(v.i); break;
     case OutVal::STR: out += '"'; JsonEscapeTo(out, v.s); out += '"'; break;
-    case OutVal::FLT: out += FmtDouble(v.f); break;
+    case OutVal::FLT: AppendRoundtripDouble(out, v.f); break;
     case OutVal::VEC:
       out += '[';
       for (size_t i = 0; i < v.v.size(); ++i) {
         if (i) out += ',';
-        out += FmtDouble(static_cast<double>(v.v[i]));
+        AppendRoundtripFloat(out, v.v[i]);
       }
       out += ']';
       break;

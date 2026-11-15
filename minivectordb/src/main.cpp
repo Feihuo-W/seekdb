@@ -11,7 +11,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
+// Protocol output uses C stdio, with immediate per-response flush.
 #include <string>
 #include <vector>
 
@@ -368,7 +368,6 @@ class LineReader {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::ios::sync_with_stdio(false);
   std::string dir = "/data";
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -396,8 +395,8 @@ int main(int argc, char** argv) {
   std::fflush(stderr);
   // STDIO_PROTOCOL.md handshake: exactly this object on stdout, flushed,
   // after recovery and before reading the first request.
-  std::cout << "{\"type\":\"ready\"}\n";
-  std::cout.flush();
+  std::fputs("{\"type\":\"ready\"}\n", stdout);
+  std::fflush(stdout);
 
   const bool trace_all = std::getenv("MVDB_TRACE") != nullptr;
   // Query results are streamed through this buffer so a result larger than RAM
@@ -407,17 +406,17 @@ int main(int argc, char** argv) {
   auto sink = [&](const char* p, size_t n) {
     obuf.append(p, n);
     if (obuf.size() >= (1 << 16)) {
-      std::cout.write(obuf.data(), static_cast<std::streamsize>(obuf.size()));
+      std::fwrite(obuf.data(), 1, obuf.size(), stdout);
       obuf.clear();
     }
   };
   auto finish = [&]() {
     if (!obuf.empty()) {
-      std::cout.write(obuf.data(), static_cast<std::streamsize>(obuf.size()));
+      std::fwrite(obuf.data(), 1, obuf.size(), stdout);
       obuf.clear();
     }
-    std::cout.put('\n');
-    std::cout.flush();
+    std::fputc('\n', stdout);
+    std::fflush(stdout);
   };
   auto emit = [&](const std::string& out) {
     sink(out.data(), out.size());
@@ -438,7 +437,7 @@ int main(int argc, char** argv) {
         obuf.append(p, n);
       }
       if (obuf.size() >= (1 << 16)) {
-        std::cout.write(obuf.data(), static_cast<std::streamsize>(obuf.size()));
+        std::fwrite(obuf.data(), 1, obuf.size(), stdout);
         obuf.clear();
       }
     };
@@ -510,14 +509,14 @@ int main(int argc, char** argv) {
         line.erase(0, 3);
       }
     }
-    std::string stmt = Trim(line);
-    if (stmt.empty()) continue;
-    if (stmt[0] == '{') {
+    const size_t first = line.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) continue;
+    if (line[first] == '{') {
       std::string idraw = "null";
       std::string op;
       std::string sql;
       std::string mode = "exact";
-      if (!ParseRequest(stmt, &idraw, &op, &sql, &mode)) {
+      if (!ParseRequest(line, &idraw, &op, &sql, &mode)) {
         emit("{\"id\":" + idraw +
              ",\"ok\":false,\"error\":{\"code\":\"invalid_request\","
              "\"message\":\"malformed JSON request\"}}");
@@ -539,8 +538,9 @@ int main(int argc, char** argv) {
       run_json(sql, idraw);
       continue;
     }
-    // Legacy raw-SQL lines (local self-test tools); the official judge only
-    // sends JSONL requests, handled above.
+    // Legacy raw-SQL lines still use the original normalization. JSONL owns
+    // its whitespace parsing and need not duplicate the entire request line.
+    std::string stmt = Trim(line);
     if (stmt[0] == '#') continue;
     if (stmt.rfind("--", 0) == 0) {
       std::string rest = Lower(Trim(stmt.substr(2)));

@@ -1,4 +1,6 @@
 #include "engine.h"
+#include "float_certificate.h"
+#include "crc_ieee8.h"
 
 #include <cerrno>
 #include <cstdlib>
@@ -13,10 +15,12 @@
 #include <algorithm>
 #include <cfloat>
 #include <chrono>
+#include <functional>
 #include <limits>
 #include <queue>
 #include <unordered_set>
 #include <utility>
+#include <type_traits>
 
 #if defined(__x86_64__)
 #include <immintrin.h>
@@ -43,22 +47,7 @@ constexpr size_t kWalGrowBytes = 16u << 20;
 // most this much log.
 constexpr size_t kCompactWalBytes = 256u << 20;
 
-uint32_t Crc32(const void* data, size_t n) {
-  static uint32_t table[256];
-  static bool init = false;
-  if (!init) {
-    for (uint32_t i = 0; i < 256; ++i) {
-      uint32_t c = i;
-      for (int k = 0; k < 8; ++k) c = (c & 1) ? 0xEDB88320u ^ (c >> 1) : c >> 1;
-      table[i] = c;
-    }
-    init = true;
-  }
-  const uint8_t* p = static_cast<const uint8_t*>(data);
-  uint32_t c = 0xFFFFFFFFu;
-  for (size_t i = 0; i < n; ++i) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
-  return c ^ 0xFFFFFFFFu;
-}
+uint32_t Crc32(const void* data,size_t n) { return vdb_crc::Crc(data,n); }
 
 inline void PutU8(std::string& b, uint8_t v) { b.push_back(static_cast<char>(v)); }
 inline void PutU32(std::string& b, uint32_t v) {
@@ -689,6 +678,7 @@ bool Engine::BindQueryVector(const Column& col, const Literal& lit, std::vector<
 
 void Engine::EnsureScan(const TableState& t) const {
   if (!t.scan_dirty) return;
+  if (q8_cache_.table == t.schema.id) q8_cache_.Clear();
   t.scan.clear();
   t.scan.reserve(t.rows.size());
   for (const auto& kv : t.rows) t.scan.emplace_back(kv.first, kv.second);
@@ -893,11 +883,49 @@ __attribute__((target("avx2,fma"))) double L2SqAvx2D(const float* a, const float
 // 热路径只保留一次间接调用。
 using L2Fn = double (*)(const float*, const float*, int);
 
+#if defined(__x86_64__)
+// SSE2 is part of the x86_64 ABI. Explicit target prevents accidental AVX
+// dependencies in this helper. Original finite float32 values remain truth.
+__attribute__((target("sse2"))) double L2SqSse2Certificate(const float* a,const float* b,int dim) {
+  __m128 a0=_mm_setzero_ps(),a1=a0,a2=a0,a3=a0;
+  int i=0;
+  for(;i+16<=dim;i+=16) {
+    __m128 d0=_mm_sub_ps(_mm_loadu_ps(a+i),_mm_loadu_ps(b+i));
+    __m128 d1=_mm_sub_ps(_mm_loadu_ps(a+i+4),_mm_loadu_ps(b+i+4));
+    __m128 d2=_mm_sub_ps(_mm_loadu_ps(a+i+8),_mm_loadu_ps(b+i+8));
+    __m128 d3=_mm_sub_ps(_mm_loadu_ps(a+i+12),_mm_loadu_ps(b+i+12));
+    a0=_mm_add_ps(a0,_mm_mul_ps(d0,d0));a1=_mm_add_ps(a1,_mm_mul_ps(d1,d1));
+    a2=_mm_add_ps(a2,_mm_mul_ps(d2,d2));a3=_mm_add_ps(a3,_mm_mul_ps(d3,d3));
+  }
+  for(;i+4<=dim;i+=4) {
+    __m128 d=_mm_sub_ps(_mm_loadu_ps(a+i),_mm_loadu_ps(b+i));a0=_mm_add_ps(a0,_mm_mul_ps(d,d));
+  }
+  __m128 s=_mm_add_ps(_mm_add_ps(a0,a1),_mm_add_ps(a2,a3));
+  __m128 t=_mm_add_ps(s,_mm_movehl_ps(s,s));
+  float sum=_mm_cvtss_f32(_mm_add_ss(t,_mm_shuffle_ps(t,t,_MM_SHUFFLE(1,1,1,1))));
+  for(;i<dim;++i) {
+    float x,y;std::memcpy(&x,reinterpret_cast<const uint8_t*>(a)+size_t(i)*4,4);
+    std::memcpy(&y,reinterpret_cast<const uint8_t*>(b)+size_t(i)*4,4);
+    float d=x-y;sum+=d*d;
+  }
+  return static_cast<double>(sum);
+}
+#endif
+
+
+
+
 L2Fn ResolveL2Fn() {
 #if defined(__x86_64__)
+#ifdef MVDB_TEST_FORCE_SSE2
+  return &L2SqSse2Certificate;
+#else
   if (__builtin_cpu_supports("avx2") && __builtin_cpu_supports("fma")) return &L2SqAvx2D;
+  return &L2SqSse2Certificate;
 #endif
+#else
   return &L2SqScalar;
+#endif
 }
 
 const L2Fn g_l2_fn = ResolveL2Fn();
@@ -1176,6 +1204,198 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
   std::string err;
   if (!BuildPredicates(s, st.where, &conds, err)) return JsonError(err);
 
+  // Derive a query-local intersection in the existing signed BIGINT domain.
+  // Inclusive/exclusive flags avoid overflowing at INT64_MIN/INT64_MAX.
+  bool has_pk_bounds = false;
+  bool pk_has_lower = false, pk_has_upper = false;
+  bool pk_lower_inclusive = true, pk_upper_inclusive = true;
+  int64_t pk_lower = 0, pk_upper = 0;
+  auto merge_pk_lower = [&](int64_t value, bool inclusive) {
+    if (!pk_has_lower || value > pk_lower) {
+      pk_has_lower = true;
+      pk_lower = value;
+      pk_lower_inclusive = inclusive;
+    } else if (value == pk_lower) {
+      pk_lower_inclusive = pk_lower_inclusive && inclusive;
+    }
+  };
+  auto merge_pk_upper = [&](int64_t value, bool inclusive) {
+    if (!pk_has_upper || value < pk_upper) {
+      pk_has_upper = true;
+      pk_upper = value;
+      pk_upper_inclusive = inclusive;
+    } else if (value == pk_upper) {
+      pk_upper_inclusive = pk_upper_inclusive && inclusive;
+    }
+  };
+  for (const auto& condition : conds) {
+    if (condition.col != s.pk || condition.is_str) continue;
+    has_pk_bounds = true;
+    switch (condition.op) {
+      case CmpOp::EQ:
+        merge_pk_lower(condition.ival, true);
+        merge_pk_upper(condition.ival, true);
+        break;
+      case CmpOp::LT: merge_pk_upper(condition.ival, false); break;
+      case CmpOp::LE: merge_pk_upper(condition.ival, true); break;
+      case CmpOp::GT: merge_pk_lower(condition.ival, false); break;
+      case CmpOp::GE: merge_pk_lower(condition.ival, true); break;
+    }
+  }
+  const bool pk_bounds_empty = pk_has_lower && pk_has_upper &&
+      (pk_lower > pk_upper ||
+       (pk_lower == pk_upper && (!pk_lower_inclusive || !pk_upper_inclusive)));
+
+  // Defining/deriving bounds does not return from ExecSelect. All ordinary
+  // projection/ORDER/vector binding and error validation still runs first.
+  // Test coverage with signed comparisons only: no endpoint +/-1 arithmetic.
+  // Empty maps are covered. Overlay tombstones remain in its min/max span;
+  // that can conservatively choose narrow iteration, but cannot lose a row.
+  auto pk_covers_all = [&](const auto& rows) {
+    if (rows.empty()) return true;
+    const int64_t first = rows.begin()->first;
+    const int64_t last = rows.rbegin()->first;
+    const bool lower_covers = !pk_has_lower || first > pk_lower ||
+        (first == pk_lower && pk_lower_inclusive);
+    const bool upper_covers = !pk_has_upper || last < pk_upper ||
+        (last == pk_upper && pk_upper_inclusive);
+    return lower_covers && upper_covers;
+  };
+  auto pk_covers_overlay = [&]() {
+    const auto overlay_table = overlay_.find(s.id);
+    return overlay_table == overlay_.end() || pk_covers_all(overlay_table->second);
+  };
+  // Short-circuit both coverage tests for ordinary queries without PK bounds.
+  const bool pk_use_narrow = has_pk_bounds &&
+      !(pk_covers_all(t->rows) && pk_covers_overlay());
+
+  // One non-template operator() owns the point/map/overlay cold traversal. It
+  // never invokes ForEachRow through std::function for an entire-table scan.
+  auto iterate_pk_narrow = [&](const std::function<void(int64_t, const RowView&)>& fn)
+      __attribute__((noinline)) {
+    // Reuse a pre-existing clean committed view without constructing one.
+    // Kept in this single cold body: no extra flat loop at five generic sites.
+    if (!t->scan_dirty) {
+      const auto overlay_table = overlay_.find(s.id);
+      if (overlay_table == overlay_.end() || overlay_table->second.empty()) {
+        const auto& flat = t->scan;
+        auto less_key = [](const auto& row, int64_t key) { return row.first < key; };
+        auto key_less = [](int64_t key, const auto& row) { return key < row.first; };
+        auto begin = pk_has_lower
+            ? (pk_lower_inclusive ? std::lower_bound(flat.begin(), flat.end(), pk_lower, less_key)
+                                  : std::upper_bound(flat.begin(), flat.end(), pk_lower, key_less))
+            : flat.begin();
+        const auto end = pk_has_upper
+            ? (pk_upper_inclusive ? std::upper_bound(flat.begin(), flat.end(), pk_upper, key_less)
+                                  : std::lower_bound(flat.begin(), flat.end(), pk_upper, less_key))
+            : flat.end();
+        for (; begin != end; ++begin) {
+          RowView view = MakeView(begin->second);
+          view.s = &s;
+          if (view.Valid()) fn(begin->first, view);
+        }
+        return;
+      }
+    }
+    if (pk_has_lower && pk_has_upper && pk_lower == pk_upper) {
+      // Empty/exclusive equality was eliminated above. A point needs one find,
+      // not two independent bound searches plus a generic range merge.
+      const auto overlay_table = overlay_.find(s.id);
+      if (overlay_table != overlay_.end()) {
+        const auto changed = overlay_table->second.find(pk_lower);
+        if (changed != overlay_table->second.end()) {
+          if (!changed->second.del) {
+            RowView view;
+            view.s = &s;
+            view.p = reinterpret_cast<const uint8_t*>(changed->second.bytes.data());
+            view.n = changed->second.bytes.size();
+            if (view.Valid()) fn(pk_lower, view);
+          }
+          return;
+        }
+      }
+      const auto committed_point = t->rows.find(pk_lower);
+      if (committed_point != t->rows.end()) {
+        RowView view = MakeView(committed_point->second);
+        view.s = &s;
+        if (view.Valid()) fn(pk_lower, view);
+      }
+      return;
+    }
+    const auto& committed = t->rows;
+    auto ib = pk_has_lower
+        ? (pk_lower_inclusive ? committed.lower_bound(pk_lower) : committed.upper_bound(pk_lower))
+        : committed.begin();
+    const auto ie = pk_has_upper
+        ? (pk_upper_inclusive ? committed.upper_bound(pk_upper) : committed.lower_bound(pk_upper))
+        : committed.end();
+    const auto oit = overlay_.find(s.id);
+    const bool has_overlay = oit != overlay_.end() && !oit->second.empty();
+    if (!has_overlay) {
+      for (; ib != ie; ++ib) {
+        RowView view = MakeView(ib->second);
+        view.s = &s;
+        if (view.Valid()) fn(ib->first, view);
+      }
+      return;
+    }
+    const std::map<int64_t, OverlayRow>& overlay = oit->second;
+    auto ob = pk_has_lower
+        ? (pk_lower_inclusive ? overlay.lower_bound(pk_lower) : overlay.upper_bound(pk_lower))
+        : overlay.begin();
+    const auto oe = pk_has_upper
+        ? (pk_upper_inclusive ? overlay.upper_bound(pk_upper) : overlay.lower_bound(pk_upper))
+        : overlay.end();
+    while (ib != ie || ob != oe) {
+      if (ob == oe || (ib != ie && ib->first < ob->first)) {
+        RowView view = MakeView(ib->second);
+        view.s = &s;
+        if (view.Valid()) fn(ib->first, view);
+        ++ib;
+      } else if (ib == ie || ob->first < ib->first) {
+        if (!ob->second.del) {
+          RowView view;
+          view.s = &s;
+          view.p = reinterpret_cast<const uint8_t*>(ob->second.bytes.data());
+          view.n = ob->second.bytes.size();
+          if (view.Valid()) fn(ob->first, view);
+        }
+        ++ob;
+      } else {
+        // Same key: overlay replacement wins; a tombstone suppresses both.
+        if (!ob->second.del) {
+          RowView view;
+          view.s = &s;
+          view.p = reinterpret_cast<const uint8_t*>(ob->second.bytes.data());
+          view.n = ob->second.bytes.size();
+          if (view.Valid()) fn(ib->first, view);
+        }
+        ++ib;
+        ++ob;
+      }
+    }
+  };
+
+  // The five call sites retain their original callback types on the hot path.
+  // A temporary erased callback is created only for the selected narrow path;
+  // it is consumed synchronously and no callback or RowView reference escapes.
+  auto for_select_rows = [&](auto&& fn) {
+    if (pk_bounds_empty) return;
+    if (!pk_use_narrow) {
+      ForEachRow(*t, fn);
+      return;
+    }
+    iterate_pk_narrow(std::function<void(int64_t, const RowView&)>(fn));
+  };
+
+
+  bool mixed_distance_projections = false;
+  const Item* first_distance_item = nullptr;
+  for (const auto& item : items) if (item.kind == 2) {
+    if (first_distance_item == nullptr) first_distance_item = &item;
+    else if (item.col != first_distance_item->col || item.qvec != first_distance_item->qvec)
+      mixed_distance_projections = true;
+  }
   struct OrderBound {
     int item = -1;
     int col = -1;
@@ -1224,7 +1444,18 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     orders.push_back(std::move(ob));
   }
 
-  bool need_dist = false;
+  bool direct_distance_order = st.limit >= 0 && orders.size() == 1 &&
+      orders[0].dist_expr && !orders[0].desc;
+  if (direct_distance_order) {
+    // The fast path emits a single bound distance for selected L2 items. Only
+    // reuse it when every projected L2 is the same expression, or none is projected.
+    for (const auto& item : items)
+      if (item.kind == 2 && (item.col != orders[0].dcol || item.qvec != orders[0].dqvec)) {
+        direct_distance_order = false;
+        break;
+      }
+  }
+  bool need_dist = direct_distance_order;
   for (const auto& it : items) if (it.kind == 2) need_dist = true;
   for (const auto& ob : orders) {
     if (ob.item >= 0 && items[ob.item].kind == 2) need_dist = true;
@@ -1238,7 +1469,18 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     OutVal out;
     if (it.kind == 2) {
       out.kind = OutVal::FLT;
-      out.f = std::sqrt(dist);
+      if (mixed_distance_projections) {
+        const uint8_t* bytes = nullptr;
+        uint32_t length = 0;
+        ColAt(v, s, it.col, &bytes, &length);
+        double squared = 0.0;
+        for (size_t j = 0; j < it.qvec.size(); ++j) {
+          float x; std::memcpy(&x, bytes + j * sizeof(float), sizeof(x));
+          double delta = static_cast<double>(x) - static_cast<double>(it.qvec[j]);
+          squared += delta * delta;
+        }
+        out.f = std::sqrt(squared);
+      } else out.f = std::sqrt(dist);
       return out;
     }
     const uint8_t* p = nullptr;
@@ -1304,18 +1546,30 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     }
   }
 
+  if (direct_distance_order) {
+    dist_col = orders[0].dcol;
+    query_vec = orders[0].dqvec;
+  }
+  for (auto& order : orders) {
+    if (order.item >= 0 && items[order.item].kind == 2 &&
+        (items[order.item].col != dist_col || items[order.item].qvec != query_vec)) {
+      order.dist_expr = true;
+      order.dcol = items[order.item].col;
+      order.dqvec = items[order.item].qvec;
+    }
+  }
   bool distance_order =
-      need_dist && st.limit >= 0 && orders.size() == 1 && orders[0].item >= 0 &&
-      items[orders[0].item].kind == 2 && !orders[0].desc;
+      !mixed_distance_projections && need_dist && st.limit >= 0 && orders.size() == 1 && !orders[0].desc &&
+      (direct_distance_order || (orders[0].item >= 0 && items[orders[0].item].kind == 2));
 
   auto exact_distance = [&](const RowView& v) {
     const uint8_t* p = nullptr;
     uint32_t len = 0;
     ColAt(v, s, dist_col, &p, &len);
-    const float* a = reinterpret_cast<const float*>(p);
     double sum = 0.0;
     for (size_t i = 0; i < query_vec.size(); ++i) {
-      double d = static_cast<double>(a[i]) - static_cast<double>(query_vec[i]);
+      float x; std::memcpy(&x, p + i * sizeof(float), sizeof(x));
+      double d = static_cast<double>(x) - static_cast<double>(query_vec[i]);
       sum += d * d;
     }
     return sum;
@@ -1418,10 +1672,9 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
 
   if (distance_order) {
     size_t k = static_cast<size_t>(st.limit);
-    // Keep a margin of candidates selected with the fast float32 distance, then
-    // re-rank them with the exact double distance and cut down to K. This keeps
-    // exact mode exact at the K boundary without paying double cost per row.
-    size_t k_candidates = k == 0 ? 0 : k + std::max<size_t>(k * 3, 64);
+    // Retain exact candidates only. Auxiliary codes may exclude certified rows,
+    // but never use a fixed approximate candidate count to discard a neighbor.
+    size_t k_candidates = k;
     // priority_queue keeps the "largest" element on top; with this ordering the
     // largest is the worst candidate (largest distance, then largest primary key).
     auto worse_first = [](const SortRef& a, const SortRef& b) {
@@ -1433,9 +1686,28 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     const float* qptr = query_vec.data();
     const int qdim = static_cast<int>(query_vec.size());
     // 热路径直接用已解析好的函数指针，避免每行再过一次成员函数与守卫检查。
+    uint64_t q8_cutoff = UINT64_MAX;
+    uint64_t q8_screened = 0, q8_pruned = 0, exact_evaluated = 0;
+    uint64_t q8_build_ns = 0;
+    bool use_q8 = false;
     const L2Fn l2fn = g_l2_fn;
+    bool hybrid_float = false;
+#if defined(__x86_64__)
+    hybrid_float = (l2fn == &L2SqAvx2D || l2fn == &L2SqSse2Certificate) &&
+                   vdb_float_certificate::Enabled(qdim);
+#endif
+    double hybrid_cutoff = std::numeric_limits<double>::infinity();
+    double hybrid_last_threshold = -1.0;
     auto consider = [&](int64_t pk, const RowView& v) {
-      double dist = l2fn(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
+      // q8 and its exceptional-row fallback are unchanged while q8 is active.
+      // Only a complete float distance certified against the exact heap may
+      // exclude a row when no auxiliary-code screening is being used.
+      if (hybrid_float && !use_q8 && heap.size() == k_candidates) {
+        const double fast = l2fn(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
+        if (vdb_float_certificate::Reject(fast, hybrid_cutoff)) return;
+      }
+      ++exact_evaluated;
+      double dist = exact_distance(v);
       if (heap.size() < k_candidates) {
         heap.push(SortRef{pk, dist, v});
       } else {
@@ -1445,11 +1717,110 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
           heap.push(SortRef{pk, dist, v});
         }
       }
+      if (use_q8 && heap.size() == k_candidates)
+        q8_cutoff = safe_q8::Cutoff(heap.top().dist, q8_cache_.exponent, qdim);
+      // Keep the fallback threshold in sync even if a caller disables q8
+      // before another scan branch. Equal distances retain the same safe bound.
+      if (hybrid_float && heap.size() == k_candidates &&
+          heap.top().dist != hybrid_last_threshold) {
+        hybrid_last_threshold = heap.top().dist;
+        hybrid_cutoff = vdb_float_certificate::Cutoff(hybrid_last_threshold, qdim);
+      }
     };
     auto ovit = overlay_.find(s.id);
     bool no_overlay = ovit == overlay_.end() || ovit->second.empty();
+    std::vector<int8_t> query_codes;
+#ifndef MVDB_DISABLE_SAFE_Q8
+    // Build only for a broad scan or an already-known large posting list.
+    // A first small filtered query must not pay a full-table quantizer build.
+    bool large_known_posting = false;
+    if (no_overlay && conds.size() == 1 && conds[0].op == CmpOp::EQ && t->cache_col == conds[0].col && !t->scan_dirty) {
+      const auto& condition = conds[0];
+      if (condition.is_str) {
+        const auto key = t->cache_dict.find(condition.sval);
+        if (key != t->cache_dict.end()) {
+          const auto hits = t->cache_lists.find(key->second);
+          large_known_posting = hits != t->cache_lists.end() && hits->second.size() >= 512;
+        }
+      } else {
+        const auto hits = t->cache_int_lists.find(condition.ival);
+        large_known_posting = hits != t->cache_int_lists.end() && hits->second.size() >= 512;
+      }
+    }
+    const bool existing_codes = q8_cache_.ready && q8_cache_.table == s.id &&
+        q8_cache_.dim == qdim && !t->scan_dirty;
+    if (!has_pk_bounds && no_overlay && (conds.empty() || (conds.size() == 1 && conds[0].op == CmpOp::EQ && (large_known_posting || (existing_codes && t->cache_col != conds[0].col)))) && k > 0 && qdim >= 16 && qdim <= safe_q8::kMaxDim &&
+        t->rows.size() >= 1024 && t->rows.size() <= safe_q8::kBudget / (size_t(qdim) + 1) &&
+        safe_q8::EnvironmentSafe()) {
+      EnsureScan(*t);
+      if (q8_cache_.table != s.id || q8_cache_.dim != qdim) {
+        const auto build_start = std::chrono::steady_clock::now();
+        q8_cache_.Clear();
+        q8_cache_.table = s.id;
+        q8_cache_.dim = qdim;
+        double maximum = 0.0;
+        std::vector<double> row_maxima;
+        row_maxima.reserve(t->scan.size());
+        bool valid = true;
+        for (const auto& kv : t->scan) {
+          const RowView v = MakeView(kv.second);
+          if (!v.Valid() || v.n < size_t(vec_off) + size_t(qdim) * sizeof(float)) { valid = false; break; }
+          double row_max = 0.0;
+          for (int j = 0; j < qdim; ++j) {
+            float x; std::memcpy(&x, v.p + vec_off + size_t(j) * sizeof(float), sizeof(x));
+            if (!std::isfinite(x)) { valid = false; break; }
+            row_max = std::max(row_max, std::fabs(static_cast<double>(x)));
+          }
+          if (!valid) break;
+          row_maxima.push_back(row_max);
+        }
+        if (valid && !row_maxima.empty()) {
+          const size_t pick = (row_maxima.size() - 1) * 95 / 100;
+          std::nth_element(row_maxima.begin(), row_maxima.begin() + pick, row_maxima.end());
+          maximum = row_maxima[pick];
+        }
+        int exponent = 0;
+        if (maximum > 0) { std::frexp(maximum, &exponent); exponent -= 7;
+          while (std::ldexp(maximum, -exponent) > 126.0) ++exponent; }
+        valid = valid && exponent >= -120 && exponent <= 120;
+        if (valid) {
+          q8_cache_.exponent = exponent;
+          try {
+            q8_cache_.codes.resize(t->scan.size() * size_t(qdim));
+            q8_cache_.valid_rows.assign(t->scan.size(), 1);
+          }
+          catch (const std::bad_alloc&) { valid = false; }
+          for (size_t i = 0; valid && i < t->scan.size(); ++i) {
+            const RowView v = MakeView(t->scan[i].second);
+            for (int j = 0; j < qdim; ++j) {
+              float x; std::memcpy(&x, v.p + vec_off + size_t(j) * sizeof(float), sizeof(x));
+              if (!safe_q8::Encode(x, exponent, &q8_cache_.codes[i * size_t(qdim) + j])) {
+                // Unrepresentable outliers are always exact; never read their codes.
+                q8_cache_.valid_rows[i] = 0;
+                q8_cache_.all_valid = false;
+                break;
+              }
+            }
+          }
+        }
+        q8_cache_.ready = valid;
+        if (!valid) {
+          std::vector<int8_t>().swap(q8_cache_.codes);
+          std::vector<uint8_t>().swap(q8_cache_.valid_rows);
+        }
+        q8_build_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now() - build_start).count();
+      }
+      if (q8_cache_.ready) {
+        query_codes.resize(qdim);
+        use_q8 = true;
+        for (int j = 0; j < qdim; ++j)
+          if (!safe_q8::Encode(query_vec[j], q8_cache_.exponent, &query_codes[j])) { use_q8 = false; break; }
+      }
+    }
+#endif
     bool cacheable = false;
-    if (no_overlay && conds.size() == 1 && conds[0].op == CmpOp::EQ &&
+    if (!has_pk_bounds && no_overlay && conds.size() == 1 && conds[0].op == CmpOp::EQ &&
         t->rows.size() <= 500000) {
       const Column& fc = s.cols[conds[0].col];
       cacheable = (fc.type.kind == ColumnType::BIGINT) ||
@@ -1520,8 +1891,18 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
         }
         if (hit != nullptr) {
           const std::vector<uint32_t>& hit_rows = *hit;
+          // Small posting lists are cheaper to evaluate directly.
+          use_q8 = use_q8 && hit_rows.size() >= 512;
+          const safe_q8::CodeDistance posting_distance = safe_q8::Resolve();
           for (size_t j = 0; j < hit_rows.size(); ++j) {
             const uint32_t i = hit_rows[j];
+            if (use_q8 && (q8_cache_.all_valid || q8_cache_.valid_rows[i])) {
+              ++q8_screened;
+              if (posting_distance(q8_cache_.codes.data() + size_t(i) * qdim, query_codes.data(), qdim) > q8_cutoff) {
+                ++q8_pruned;
+                continue;
+              }
+            }
             RowView v = MakeView(t->scan[i].second);
             v.s = &s;
             if (!v.Valid()) continue;
@@ -1529,11 +1910,43 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
           }
         }
       }
+    } else if (use_q8 && conds.empty()) {
+      const safe_q8::CodeDistance code_distance = safe_q8::Resolve();
+      // Normal tables avoid an extra per-row metadata read. Exceptional tables
+      // keep explicit tags; invalid code rows always evaluate original values.
+      auto scan_codes = [&](auto all_rows_valid) {
+        for (size_t i = 0; i < t->scan.size(); ++i) {
+          ++q8_screened;
+          if constexpr (!decltype(all_rows_valid)::value) {
+            if (!q8_cache_.valid_rows[i]) {
+              RowView v = MakeView(t->scan[i].second);
+              v.s = &s;
+              if (v.Valid()) consider(t->scan[i].first, v);
+              continue;
+            }
+          }
+          const uint64_t code_sq = code_distance(q8_cache_.codes.data() + i * size_t(qdim), query_codes.data(), qdim);
+          if (code_sq > q8_cutoff) { ++q8_pruned; continue; }
+          RowView v = MakeView(t->scan[i].second);
+          v.s = &s;
+          if (v.Valid()) consider(t->scan[i].first, v);
+        }
+      };
+      if (q8_cache_.all_valid) scan_codes(std::true_type{});
+      else scan_codes(std::false_type{});
     } else if (k_candidates > 0) {
-      ForEachRow(*t, [&](int64_t pk, const RowView& v) {
-        if (!EvalPredicates(conds, v)) return;
-        consider(pk, v);
-      });
+      // The exact TopK scan has no predicates in this branch. Avoid calling
+      // the predicate evaluator once per row while preserving scan/order/
+      // distance semantics; conditional paths still use the original check.
+      if (conds.empty()) {
+        for_select_rows([&](int64_t pk, const RowView& v) { consider(pk, v); });
+      } else {
+        use_q8 = false;
+        for_select_rows([&](int64_t pk, const RowView& v) {
+          if (!EvalPredicates(conds, v)) return;
+          consider(pk, v);
+        });
+      }
     }
     std::vector<SortRef> results;
     results.reserve(heap.size());
@@ -1541,7 +1954,14 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
       results.push_back(heap.top());
       heap.pop();
     }
-    for (auto& r : results) r.dist = exact_distance(r.view);
+    // Distances in this heap were computed from original float32 in binary64.
+    if (std::getenv("MVDB_Q8_STATS")) {
+      std::fprintf(stderr, "Q8 table=%u rows=%zu dim=%d enabled=%d screened=%llu pruned=%llu exact=%llu code_bytes=%zu build_ns=%llu\n",
+          s.id, t->rows.size(), qdim, int(use_q8),
+          static_cast<unsigned long long>(q8_screened), static_cast<unsigned long long>(q8_pruned),
+          static_cast<unsigned long long>(exact_evaluated), q8_cache_.codes.size(),
+          static_cast<unsigned long long>(q8_build_ns));
+    }
     std::sort(results.begin(), results.end(), [](const SortRef& a, const SortRef& b) {
       if (a.dist != b.dist) return a.dist < b.dist;
       return a.pk < b.pk;
@@ -1554,7 +1974,7 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     emit_header();
     if (orders.empty()) {
       int64_t emitted = 0;
-      ForEachRow(*t, [&](int64_t, const RowView& v) {
+      for_select_rows([&](int64_t, const RowView& v) {
         if (st.limit >= 0 && emitted >= st.limit) return;
         if (!EvalPredicates(conds, v)) return;
         double dist = need_dist ? compute_dist(v, dist_col, query_vec) : 0.0;
@@ -1565,7 +1985,7 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
       size_t k = static_cast<size_t>(st.limit);
       if (k > 0) {
         std::priority_queue<SortRef, std::vector<SortRef>, decltype(less_ref)> heap(less_ref);
-        ForEachRow(*t, [&](int64_t pk, const RowView& v) {
+        for_select_rows([&](int64_t pk, const RowView& v) {
           if (!EvalPredicates(conds, v)) return;
           double dist = need_dist ? compute_dist(v, dist_col, query_vec) : 0.0;
           SortRef r{pk, dist, v};
@@ -1587,7 +2007,7 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
       }
     } else {
       std::vector<SortRef> refs;
-      ForEachRow(*t, [&](int64_t pk, const RowView& v) {
+      for_select_rows([&](int64_t pk, const RowView& v) {
         if (!EvalPredicates(conds, v)) return;
         double dist = need_dist ? compute_dist(v, dist_col, query_vec) : 0.0;
         refs.push_back(SortRef{pk, dist, v});
