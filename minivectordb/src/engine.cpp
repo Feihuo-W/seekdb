@@ -568,7 +568,11 @@ std::string Engine::EncodeRow(const Schema& s, const std::vector<ColumnValue>& v
     if (col.type.kind == ColumnType::BIGINT) {
       PutI64(b, vals[c].i);
     } else if (col.type.kind == ColumnType::VECTOR) {
-      for (uint32_t d = 0; d < col.type.param; ++d) PutF32(b, vals[c].v[d]);
+      // C40: 向量列在行布局里是连续的 dim 个 float32，vals[c].v 里存的已经是
+      // float32 值（BindLiteral 做过 static_cast<float>(d)）⇒ 一次 append 写出的
+      // 字节与逐维 4 字节 append 完全相同，但省掉 128 次 append 的簿记开销。
+      b.append(reinterpret_cast<const char*>(vals[c].v.data()),
+               vals[c].v.size() * sizeof(float));
     }
   }
   for (size_t c = 0; c < s.cols.size(); ++c) {
@@ -1258,7 +1262,7 @@ inline void ExactDistanceBatch(const uint8_t* const* cols, const float* q, size_
 #if defined(__x86_64__)
 template <typename Sink>
 __attribute__((target("avx2"))) static void ScanRowsAvx2(
-    const int8_t* codes, size_t nrows, int qdim, const int8_t* qcodes,
+    const int8_t* codes, const uint32_t* norms, size_t nrows, int qdim, const int8_t* qcodes,
     const uint64_t* cutoff, uint64_t* screened_out, uint64_t* pruned_out, Sink&& on_survivor) {
   const size_t stride = static_cast<size_t>(qdim);
   uint64_t screened = 0, pruned = 0;
@@ -1266,7 +1270,27 @@ __attribute__((target("avx2"))) static void ScanRowsAvx2(
     // 查询码预扩宽为 int16（每查询一次）
     alignas(32) int16_t q16[4096];
     for (int j = 0; j < qdim; ++j) q16[j] = qcodes[j];
+    // C42: 查询码平方和（整数精确），每查询算一次。
+    const int64_t qnorm = static_cast<int64_t>(vdb::safe_q8::RowSquaresAvx2(qcodes, qdim));
     size_t i = 0;
+    // C41：四行展开。每行的码距与两行版本逐位相同；判定顺序也保持
+    // "逐行比较、逐行回调"（回调可能收紧 cutoff，后面的行必须用收紧后的值）。
+    for (; i + 3 < nrows; i += 4) {
+      ++screened; ++screened; ++screened; ++screened;
+      int64_t d0 = 0, d1 = 0, d2 = 0, d3 = 0;
+      vdb::safe_q8::DotAvx2Tree4Wide(codes + i * stride, codes + (i + 1) * stride,
+                                    codes + (i + 2) * stride, codes + (i + 3) * stride,
+                                    q16, qdim, &d0, &d1, &d2, &d3);
+      // C42: Σ(a-b)² = Σa² + Σb² - 2Σab（整数域精确，值与直接求和相同）
+      const uint64_t sq0 = static_cast<uint64_t>(static_cast<int64_t>(norms[i]) + qnorm - 2 * d0);
+      const uint64_t sq1 = static_cast<uint64_t>(static_cast<int64_t>(norms[i + 1]) + qnorm - 2 * d1);
+      const uint64_t sq2 = static_cast<uint64_t>(static_cast<int64_t>(norms[i + 2]) + qnorm - 2 * d2);
+      const uint64_t sq3 = static_cast<uint64_t>(static_cast<int64_t>(norms[i + 3]) + qnorm - 2 * d3);
+      if (sq0 > *cutoff) { ++pruned; } else { on_survivor(i); }
+      if (sq1 > *cutoff) { ++pruned; } else { on_survivor(i + 1); }
+      if (sq2 > *cutoff) { ++pruned; } else { on_survivor(i + 2); }
+      if (sq3 > *cutoff) { ++pruned; } else { on_survivor(i + 3); }
+    }
     for (; i + 1 < nrows; i += 2) {
       ++screened; ++screened;
       uint64_t sq0 = 0, sq1 = 0;
@@ -1937,16 +1961,45 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
           catch (const std::bad_alloc&) { valid = false; }
           // C36: 缩放因子在循环外算一次（2^(-exponent)，精确可表示）。
           const double code_scale = std::ldexp(1.0, -exponent);
+          // C38: 整行 AVX2 编码（一次 4 个 float32）。平台 CPU 未必支持 AVX2，
+          // 所以按运行期检测选择；不支持时走原来的逐元素标量路径。
+          const bool encode_avx2 = safe_q8::UseAvx2();
           for (size_t i = 0; valid && i < t->scan.size(); ++i) {
             const RowView v = MakeView(t->scan[i].second);
-            for (int j = 0; j < qdim; ++j) {
-              float x; std::memcpy(&x, v.p + vec_off + size_t(j) * sizeof(float), sizeof(x));
-              if (!safe_q8::EncodeScaled(x, code_scale, &q8_cache_.codes[i * size_t(qdim) + j])) {
-                // Unrepresentable outliers are always exact; never read their codes.
-                q8_cache_.valid_rows[i] = 0;
-                q8_cache_.all_valid = false;
-                break;
+            int8_t* dst = q8_cache_.codes.data() + i * size_t(qdim);
+            const uint8_t* src = v.p + vec_off;
+            bool row_ok = true;
+#if defined(__x86_64__)
+            if (encode_avx2) {
+              row_ok = safe_q8::EncodeRowAvx2(reinterpret_cast<const float*>(src), qdim,
+                                              code_scale, dst);
+            }
+#endif
+            if (!row_ok) {
+              // SIMD 路径拒了这一行（NaN、超范围或尾部）：退回逐元素标量路径，
+              // 语义与原来完全一致（标脏该行并停止写该行剩余元素）。
+              row_ok = true;
+              for (int j = 0; j < qdim; ++j) {
+                float x; std::memcpy(&x, src + size_t(j) * sizeof(float), sizeof(x));
+                if (!safe_q8::EncodeScaled(x, code_scale, dst + j)) {
+                  row_ok = false;
+                  break;
+                }
               }
+            }
+            if (!row_ok) {
+              // Unrepresentable outliers are always exact; never read their codes.
+              q8_cache_.valid_rows[i] = 0;
+              q8_cache_.all_valid = false;
+            }
+          }
+          // C42: 预计算每行的码平方和（整数域精确）。这是索引准备的一部分，
+          // 不落在查询阶段里；只有 AVX2 扫描路径需要它。
+          if (safe_q8::UseAvx2()) {
+            q8_cache_.norms.assign(t->scan.size(), 0);
+            for (size_t i = 0; i < t->scan.size(); ++i) {
+              q8_cache_.norms[i] = static_cast<uint32_t>(
+                  safe_q8::RowSquaresAvx2(q8_cache_.codes.data() + i * size_t(qdim), qdim));
             }
           }
         }
@@ -2092,7 +2145,7 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
           uint64_t screened = 0, pruned = 0;
 #if defined(__x86_64__)
           if constexpr (decltype(avx2_tag)::value) {
-            ScanRowsAvx2(codes, t->scan.size(), qdim, qcodes, &q8_cutoff, &screened, &pruned,
+            ScanRowsAvx2(codes, q8_cache_.norms.data(), t->scan.size(), qdim, qcodes, &q8_cutoff, &screened, &pruned,
                          [&](size_t i) {
               RowView v = MakeView(t->scan[i].second);
               v.s = &s;
