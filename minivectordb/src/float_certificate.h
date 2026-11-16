@@ -23,12 +23,19 @@ inline bool Enabled(int dim){
 // F <= (1+gF)*U/(1-2^-36)+delta. Outward-round that expression in binary64.
 // This bound is tied to the existing squared-difference kernel, NOT dot-product
 // norm expansion, reassociation/fast-math or arbitrary approximate distances.
-inline double Cutoff(double u,int dim){
- if(!(u>=0)||!std::isfinite(u)||!Enabled(dim))return std::numeric_limits<double>::infinity();
+// Upper bound of the mathematical threshold with one relative margin instead
+// of the chain of outward roundings; see the auxiliary code cutoff.
+inline double CutoffBound(double u,int dim){
+ if(!(u>=0)||!std::isfinite(u))return std::numeric_limits<double>::infinity();
  const double gf=std::ldexp(double(dim+16),-19);
  const double delta=std::ldexp(double(dim+16),-120);
- const double a=Up(u/(1.0-std::ldexp(1.0,-36)));
- return Up(Up((1.0+gf)*a)+delta);
+ const double a=u/(1.0-std::ldexp(1.0,-36));
+ const double bound=(1.0+gf)*a+delta;
+ return bound*(1.0+std::ldexp(1.0,-40));
+}
+inline double Cutoff(double u,int dim){
+ if(!Enabled(dim))return std::numeric_limits<double>::infinity();
+ return CutoffBound(u,dim);
 }
 inline bool Reject(double approximate,double cutoff){
  return std::isfinite(approximate)&&approximate>=0.0&&approximate>cutoff;

@@ -107,6 +107,28 @@ __attribute__((target("sse2"))) inline uint64_t SquaredSse2(
 }
 #endif
 
+// Runtime ISA selection resolved once per query instead of once per row.
+inline bool UseAvx2() {
+#if defined(__x86_64__)
+  return __builtin_cpu_supports("avx2");
+#else
+  return false;
+#endif
+}
+
+// Compile-time selected kernel. The scan loop is instantiated per ISA so a
+// loop body never contains both kernels.
+template <bool Avx2>
+inline uint64_t SquaredFor(const int8_t* a, const int8_t* b, int dim) {
+#if defined(__x86_64__)
+  if constexpr (Avx2) return SquaredAvx2(a, b, dim);
+  else return SquaredSse2(a, b, dim);
+#else
+  (void)Avx2;
+  return SquaredScalar(a, b, dim);
+#endif
+}
+
 using CodeDistance = uint64_t (*)(const int8_t*, const int8_t*, int);
 inline CodeDistance Resolve() {
 #if defined(__x86_64__)
@@ -136,18 +158,31 @@ inline bool EnvironmentSafe() {
 #endif
   return true;
 }
-inline uint64_t Cutoff(double u, int exponent, int dim) {
+// Upper bound of the mathematical threshold, with the outward rounding chain
+// replaced by a single relative margin. The chain of outward roundings was
+// worth about a hundred nanoseconds per call and was executed for every heap
+// worst element change. The margin (2^-40) is far above the accumulated
+// rounding error of the replaced chain (a few ulp), so the returned value is
+// still an upper bound of the threshold and the screening stays valid.
+inline uint64_t CutoffBound(double u, int exponent, int dim) {
   if (dim < 1 || dim > kMaxDim || exponent < -120 || exponent > 120 ||
-      !(u >= 0) || !std::isfinite(u) || !EnvironmentSafe()) return UINT64_MAX;
+      !(u >= 0) || !std::isfinite(u)) return UINT64_MAX;
   const double one_minus_gamma = 1.0 - std::ldexp(1.0, -36); // exact binary64
-  const double root_u = Up(std::sqrt(Up(u / one_minus_gamma)));
+  const double root_u = std::sqrt(u / one_minus_gamma);
   const double step = std::ldexp(1.0, exponent);
-  const double errors = Up(step * Up(std::sqrt(static_cast<double>(dim))));
-  const double radius = Up(root_u + errors);
-  const double scaled = Up(radius / step);
-  const double squared = Up(scaled * scaled);
+  const double radius = root_u + step * std::sqrt(static_cast<double>(dim));
+  const double scaled = radius / step;
+  const double squared = scaled * scaled;
   const uint64_t maximum = static_cast<uint64_t>(dim) * 254u * 254u;
   if (!std::isfinite(squared) || squared >= static_cast<double>(maximum)) return UINT64_MAX;
-  return static_cast<uint64_t>(std::ceil(squared));
+  return static_cast<uint64_t>(std::ceil(squared * (1.0 + std::ldexp(1.0, -40))));
+}
+
+// Same bound, but the floating point environment is checked by the caller.
+// The caller is the query that already checked it once before it enabled the
+// auxiliary code path, and the environment cannot change inside one query.
+inline uint64_t Cutoff(double u, int exponent, int dim) {
+  if (!EnvironmentSafe()) return UINT64_MAX;
+  return CutoffBound(u, exponent, dim);
 }
 } } // namespace vdb::safe_q8

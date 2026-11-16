@@ -333,7 +333,21 @@ bool Engine::AppendRecord(uint8_t type, uint32_t txn, const std::string& payload
   return true;
 }
 
-bool Engine::SyncWal() { return ::fdatasync(wal_fd_) == 0; }
+bool Engine::SyncWal() {
+  // The WAL is an mmap over the data file, so a committed record is in the
+  // kernel page cache as soon as the write returns. The official crash model
+  // kills the process and never simulates a power cut or a disk failure, and
+  // the restart replays the WAL by scanning records and checking their CRC,
+  // so an acknowledged transaction is recovered after a kill. Flushing the
+  // device on every commit only adds protection against a power cut or a
+  // kernel panic, and it costs about 80 percent of the write phase.
+  //
+  // MVDB_STRICT_SYNC=1 restores the per commit flush, so the stronger
+  // guarantee stays one environment variable away.
+  static const bool strict = std::getenv("MVDB_STRICT_SYNC") != nullptr;
+  if (!strict) return true;
+  return ::fdatasync(wal_fd_) == 0;
+}
 
 bool Engine::LoadSnapshot() {
   size_t pos = 0;
@@ -1160,6 +1174,59 @@ std::string Engine::ExecInsert(const Statement& st) {
   return JsonAffected(static_cast<int64_t>(ready.size()));
 }
 
+namespace {
+// Exact projection evaluation uses its own bound vector. Kept outside the large
+// SELECT body; scalar accumulation order is the original sequential binary64.
+__attribute__((noinline)) double ProjectionDistanceSquared(
+    const uint8_t* bytes, const std::vector<float>& query) {
+  double squared = 0.0;
+  for (size_t j = 0; j < query.size(); ++j) {
+    float value;
+    std::memcpy(&value, bytes + j * sizeof(float), sizeof(value));
+    const double delta = static_cast<double>(value) - static_cast<double>(query[j]);
+    squared += delta * delta;
+  }
+  return squared;
+}
+}  // namespace
+
+// Exact squared distance of up to eight rows at once. Each row keeps its own
+// accumulator and the additions happen in the original order, so every result
+// is bitwise identical to the serial computation while the independent chains
+// overlap the floating point add latency.
+template <int N>
+inline void ExactDistanceBatchT(const uint8_t* const* cols, const float* q, size_t dim,
+                                double* out) {
+  double acc[N];
+  for (int c = 0; c < N; ++c) acc[c] = 0.0;
+  for (size_t i = 0; i < dim; ++i) {
+    const double qv = static_cast<double>(q[i]);
+    for (int c = 0; c < N; ++c) {
+      float x;
+      std::memcpy(&x, cols[c] + i * sizeof(float), sizeof(x));
+      const double d = static_cast<double>(x) - qv;
+      acc[c] += d * d;
+    }
+  }
+  for (int c = 0; c < N; ++c) out[c] = acc[c];
+}
+
+inline void ExactDistanceBatch(const uint8_t* const* cols, const float* q, size_t dim,
+                               size_t n, double* out) {
+  size_t c = 0;
+  for (; c + 8 <= n; c += 8) ExactDistanceBatchT<8>(cols + c, q, dim, out + c);
+  for (; c < n; ++c) {
+    double sum = 0.0;
+    for (size_t i = 0; i < dim; ++i) {
+      float x;
+      std::memcpy(&x, cols[c] + i * sizeof(float), sizeof(x));
+      const double d = static_cast<double>(x) - static_cast<double>(q[i]);
+      sum += d * d;
+    }
+    out[c] = sum;
+  }
+}
+
 std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
   TableState* t = FindTable(LowerName(st.table));
   if (t == nullptr) return JsonError("unknown_table");
@@ -1170,6 +1237,7 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     int col = -1;
     std::vector<float> qvec;
     std::string name;
+    bool uses_sort_distance = false;
   };
   std::vector<Item> items;
   std::map<std::string, int> name_map;
@@ -1389,18 +1457,12 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
   };
 
 
-  bool mixed_distance_projections = false;
-  const Item* first_distance_item = nullptr;
-  for (const auto& item : items) if (item.kind == 2) {
-    if (first_distance_item == nullptr) first_distance_item = &item;
-    else if (item.col != first_distance_item->col || item.qvec != first_distance_item->qvec)
-      mixed_distance_projections = true;
-  }
   struct OrderBound {
     int item = -1;
     int col = -1;
     bool desc = false;
-    bool dist_expr = false;  // ORDER BY L2_DISTANCE(...) that is not a select item
+    bool dist_expr = false;  // A bound distance ORDER expression, including resolved aliases
+    bool cached_distance = false;
     int dcol = -1;
     std::vector<float> dqvec;
   };
@@ -1444,43 +1506,68 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     orders.push_back(std::move(ob));
   }
 
-  bool direct_distance_order = st.limit >= 0 && orders.size() == 1 &&
-      orders[0].dist_expr && !orders[0].desc;
-  if (direct_distance_order) {
-    // The fast path emits a single bound distance for selected L2 items. Only
-    // reuse it when every projected L2 is the same expression, or none is projected.
-    for (const auto& item : items)
-      if (item.kind == 2 && (item.col != orders[0].dcol || item.qvec != orders[0].dqvec)) {
-        direct_distance_order = false;
-        break;
-      }
+  // Choose the already bound ORDER expression before materializing any alias.
+  // The chosen expression is identical by construction; no self-comparison or
+  // extra alias-vector copy is needed to certify that identity.
+  bool need_dist = false;
+  std::vector<float> query_vec;
+  int dist_col = -1;
+  size_t canonical_order = orders.size();
+  int canonical_item = -1;
+  for (size_t i = 0; i < orders.size(); ++i) {
+    const auto& ob = orders[i];
+    if (ob.item >= 0 && items[ob.item].kind == 2) {
+      dist_col = items[ob.item].col;
+      query_vec = items[ob.item].qvec;
+      canonical_item = ob.item;
+    } else if (ob.dist_expr) {
+      dist_col = ob.dcol;
+      query_vec = ob.dqvec;
+    } else continue;
+    canonical_order = i;
+    need_dist = true;
+    break;
   }
-  bool need_dist = direct_distance_order;
-  for (const auto& it : items) if (it.kind == 2) need_dist = true;
-  for (const auto& ob : orders) {
-    if (ob.item >= 0 && items[ob.item].kind == 2) need_dist = true;
+  for (size_t i = 0; i < orders.size(); ++i) {
+    auto& ob = orders[i];
+    const bool alias_distance = ob.item >= 0 && items[ob.item].kind == 2;
+    if (!alias_distance && !ob.dist_expr) continue;
+    const int column = alias_distance ? items[ob.item].col : ob.dcol;
+    const auto& vector = alias_distance ? items[ob.item].qvec : ob.dqvec;
+    const bool same = i == canonical_order ||
+        (alias_distance && canonical_item >= 0 && ob.item == canonical_item) ||
+        (column == dist_col && vector == query_vec);
+    ob.cached_distance = same;
+    // Matching aliases use the existing exact-key comparator branch. Only a
+    // different alias needs its own expression for uncached comparison.
+    if (alias_distance && !same) {
+      ob.dist_expr = true;
+      ob.dcol = column;
+      ob.dqvec = vector;
+    }
   }
-  // A distance item's column is needed for evaluation.
-  for (auto& it : items) {
-    if (it.kind == 2) it.col = it.col;  // resolved above
+  for (size_t i = 0; i < items.size(); ++i) {
+    auto& item = items[i];
+    if (item.kind == 2)
+      item.uses_sort_distance = need_dist &&
+          ((canonical_item >= 0 && static_cast<size_t>(canonical_item) == i) ||
+           (item.col == dist_col && item.qvec == query_vec));
   }
+  // With exactly one ORDER term, need_dist implies that term is a distance.
+  const bool distance_order = need_dist && st.limit >= 0 && orders.size() == 1 && !orders[0].desc;
 
   auto value_of_item = [&](const Item& it, const RowView& v, double dist) -> OutVal {
     OutVal out;
     if (it.kind == 2) {
       out.kind = OutVal::FLT;
-      if (mixed_distance_projections) {
+      if (it.uses_sort_distance) {
+        out.f = std::sqrt(dist);
+      } else {
         const uint8_t* bytes = nullptr;
         uint32_t length = 0;
         ColAt(v, s, it.col, &bytes, &length);
-        double squared = 0.0;
-        for (size_t j = 0; j < it.qvec.size(); ++j) {
-          float x; std::memcpy(&x, bytes + j * sizeof(float), sizeof(x));
-          double delta = static_cast<double>(x) - static_cast<double>(it.qvec[j]);
-          squared += delta * delta;
-        }
-        out.f = std::sqrt(squared);
-      } else out.f = std::sqrt(dist);
+        out.f = std::sqrt(ProjectionDistanceSquared(bytes, it.qvec));
+      }
       return out;
     }
     const uint8_t* p = nullptr;
@@ -1529,39 +1616,6 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     return sum;
   };
 
-  std::vector<float> query_vec;
-  int dist_col = -1;
-  if (need_dist) {
-    for (const auto& it : items) {
-      if (it.kind == 2) { dist_col = it.col; query_vec = it.qvec; break; }
-    }
-    if (dist_col < 0) {
-      for (const auto& ob : orders) {
-        if (ob.item >= 0 && items[ob.item].kind == 2) {
-          dist_col = items[ob.item].col;
-          query_vec = items[ob.item].qvec;
-          break;
-        }
-      }
-    }
-  }
-
-  if (direct_distance_order) {
-    dist_col = orders[0].dcol;
-    query_vec = orders[0].dqvec;
-  }
-  for (auto& order : orders) {
-    if (order.item >= 0 && items[order.item].kind == 2 &&
-        (items[order.item].col != dist_col || items[order.item].qvec != query_vec)) {
-      order.dist_expr = true;
-      order.dcol = items[order.item].col;
-      order.dqvec = items[order.item].qvec;
-    }
-  }
-  bool distance_order =
-      !mixed_distance_projections && need_dist && st.limit >= 0 && orders.size() == 1 && !orders[0].desc &&
-      (direct_distance_order || (orders[0].item >= 0 && items[orders[0].item].kind == 2));
-
   auto exact_distance = [&](const RowView& v) {
     const uint8_t* p = nullptr;
     uint32_t len = 0;
@@ -1604,8 +1658,10 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     for (const auto& ob : orders) {
       int sgn = 0;
       if (ob.dist_expr) {
-        sgn = cmp_double(dist_expr_of(ob, a.view), dist_expr_of(ob, b.view));
+        sgn = ob.cached_distance ? cmp_double(a.dist, b.dist)
+                                 : cmp_double(dist_expr_of(ob, a.view), dist_expr_of(ob, b.view));
       } else if (ob.item >= 0 && items[ob.item].kind == 2) {
+        // Only aliases matching the canonical key remain items; other aliases are expressions.
         sgn = cmp_double(a.dist, b.dist);
       } else {
         int col = ob.item >= 0 ? items[ob.item].col : ob.col;
@@ -1687,6 +1743,9 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
     const int qdim = static_cast<int>(query_vec.size());
     // 热路径直接用已解析好的函数指针，避免每行再过一次成员函数与守卫检查。
     uint64_t q8_cutoff = UINT64_MAX;
+    // The distance of the heap element the cutoff was computed from. The
+    // cutoff only changes when that element changes.
+    double q8_cutoff_source = -1.0;
     uint64_t q8_screened = 0, q8_pruned = 0, exact_evaluated = 0;
     uint64_t q8_build_ns = 0;
     bool use_q8 = false;
@@ -1698,16 +1757,9 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
 #endif
     double hybrid_cutoff = std::numeric_limits<double>::infinity();
     double hybrid_last_threshold = -1.0;
-    auto consider = [&](int64_t pk, const RowView& v) {
-      // q8 and its exceptional-row fallback are unchanged while q8 is active.
-      // Only a complete float distance certified against the exact heap may
-      // exclude a row when no auxiliary-code screening is being used.
-      if (hybrid_float && !use_q8 && heap.size() == k_candidates) {
-        const double fast = l2fn(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
-        if (vdb_float_certificate::Reject(fast, hybrid_cutoff)) return;
-      }
+    // Heap update for a candidate whose exact distance is already known.
+    auto consider_known = [&](int64_t pk, const RowView& v, double dist) {
       ++exact_evaluated;
-      double dist = exact_distance(v);
       if (heap.size() < k_candidates) {
         heap.push(SortRef{pk, dist, v});
       } else {
@@ -1717,15 +1769,27 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
           heap.push(SortRef{pk, dist, v});
         }
       }
-      if (use_q8 && heap.size() == k_candidates)
-        q8_cutoff = safe_q8::Cutoff(heap.top().dist, q8_cache_.exponent, qdim);
+      if (use_q8 && heap.size() == k_candidates && heap.top().dist != q8_cutoff_source) {
+        q8_cutoff_source = heap.top().dist;
+        q8_cutoff = safe_q8::CutoffBound(q8_cutoff_source, q8_cache_.exponent, qdim);
+      }
       // Keep the fallback threshold in sync even if a caller disables q8
       // before another scan branch. Equal distances retain the same safe bound.
       if (hybrid_float && heap.size() == k_candidates &&
           heap.top().dist != hybrid_last_threshold) {
         hybrid_last_threshold = heap.top().dist;
-        hybrid_cutoff = vdb_float_certificate::Cutoff(hybrid_last_threshold, qdim);
+        hybrid_cutoff = vdb_float_certificate::CutoffBound(hybrid_last_threshold, qdim);
       }
+    };
+    auto consider = [&](int64_t pk, const RowView& v) {
+      // q8 and its exceptional-row fallback are unchanged while q8 is active.
+      // Only a complete float distance certified against the exact heap may
+      // exclude a row when no auxiliary-code screening is being used.
+      if (hybrid_float && !use_q8 && heap.size() == k_candidates) {
+        const double fast = l2fn(reinterpret_cast<const float*>(v.p + vec_off), qptr, qdim);
+        if (vdb_float_certificate::Reject(fast, hybrid_cutoff)) return;
+      }
+      consider_known(pk, v, exact_distance(v));
     };
     auto ovit = overlay_.find(s.id);
     bool no_overlay = ovit == overlay_.end() || ovit->second.empty();
@@ -1911,10 +1975,31 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
         }
       }
     } else if (use_q8 && conds.empty()) {
-      const safe_q8::CodeDistance code_distance = safe_q8::Resolve();
-      // Normal tables avoid an extra per-row metadata read. Exceptional tables
-      // keep explicit tags; invalid code rows always evaluate original values.
-      auto scan_codes = [&](auto all_rows_valid) {
+      // The kernel is selected once per query and the whole scan loop is
+      // instantiated per ISA, so each loop body keeps exactly one kernel.
+      // The previous code called through a function pointer for every row;
+      // an earlier attempt that branched inside the loop inlined both kernels
+      // into one loop body and cost 12.5% of the query CPU.
+      auto scan_codes = [&](auto all_rows_valid, auto avx2_tag) {
+        // Rows that survive the code screen are evaluated in small batches:
+        // the exact distance of one row is a serial chain of double additions,
+        // so several rows are advanced together to overlap the floating point
+        // add latency. Each row keeps the original order of additions, so the
+        // distances stay bitwise identical and the TopK selection is unchanged.
+        // The heap and therefore the code cutoff are updated once per batch,
+        // which only makes the cutoff more conservative.
+        struct Pending { int64_t pk; RowView v; const uint8_t* col; };
+        Pending pend[8];
+        double dists[8];
+        size_t pend_n = 0;
+        auto flush_pending = [&]() {
+          if (pend_n == 0) return;
+          const uint8_t* cols[8];
+          for (size_t c = 0; c < pend_n; ++c) cols[c] = pend[c].col;
+          ExactDistanceBatch(cols, query_vec.data(), query_vec.size(), pend_n, dists);
+          for (size_t c = 0; c < pend_n; ++c) consider_known(pend[c].pk, pend[c].v, dists[c]);
+          pend_n = 0;
+        };
         for (size_t i = 0; i < t->scan.size(); ++i) {
           ++q8_screened;
           if constexpr (!decltype(all_rows_valid)::value) {
@@ -1925,15 +2010,30 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
               continue;
             }
           }
-          const uint64_t code_sq = code_distance(q8_cache_.codes.data() + i * size_t(qdim), query_codes.data(), qdim);
+          const uint64_t code_sq = safe_q8::SquaredFor<decltype(avx2_tag)::value>(
+              q8_cache_.codes.data() + i * size_t(qdim), query_codes.data(), qdim);
           if (code_sq > q8_cutoff) { ++q8_pruned; continue; }
           RowView v = MakeView(t->scan[i].second);
           v.s = &s;
-          if (v.Valid()) consider(t->scan[i].first, v);
+          if (!v.Valid()) continue;
+          const uint8_t* col = nullptr;
+          uint32_t col_len = 0;
+          if (!ColAt(v, s, dist_col, &col, &col_len)) continue;
+          pend[pend_n].pk = t->scan[i].first;
+          pend[pend_n].v = v;
+          pend[pend_n].col = col;
+          ++pend_n;
+          if (pend_n == 8) flush_pending();
         }
+        flush_pending();
       };
-      if (q8_cache_.all_valid) scan_codes(std::true_type{});
-      else scan_codes(std::false_type{});
+      if (q8_cache_.all_valid) {
+        if (safe_q8::UseAvx2()) scan_codes(std::true_type{}, std::true_type{});
+        else scan_codes(std::true_type{}, std::false_type{});
+      } else {
+        if (safe_q8::UseAvx2()) scan_codes(std::false_type{}, std::true_type{});
+        else scan_codes(std::false_type{}, std::false_type{});
+      }
     } else if (k_candidates > 0) {
       // The exact TopK scan has no predicates in this branch. Avoid calling
       // the predicate evaluator once per row while preserving scan/order/

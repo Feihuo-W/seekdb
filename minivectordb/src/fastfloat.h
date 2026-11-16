@@ -12,6 +12,26 @@ namespace vdb {
 // [-22, 22] both the mantissa and 10^k are exactly representable in double,
 // so a single IEEE division/multiplication yields the correctly rounded
 // result - identical to strtod. Anything else falls back to strtod.
+// Eight decimal digits are parsed at once. The trick is the standard SWAR
+// one: the eight bytes are turned into their numeric value with two 64 bit
+// multiplies, which removes the serial "mant = mant * 10 + digit" chain that
+// dominated the write phase.
+inline bool EightDigits(uint64_t val) {
+  return (((val & 0xF0F0F0F0F0F0F0F0ULL) |
+           (((val + 0x0606060606060606ULL) & 0xF0F0F0F0F0F0F0F0ULL) >> 4)) ==
+          0x3333333333333333ULL);
+}
+
+inline uint32_t ParseEightDigits(uint64_t val) {
+  const uint64_t mask = 0x000000FF000000FFULL;
+  const uint64_t mul1 = 0x000F424000000064ULL;  // 100 + (1000000 << 32)
+  const uint64_t mul2 = 0x0000271000000001ULL;  // 1 + (10000 << 32)
+  val -= 0x3030303030303030ULL;
+  val = (val * 10) + (val >> 8);
+  val = (((val & mask) * mul1) + (((val >> 16) & mask) * mul2)) >> 32;
+  return static_cast<uint32_t>(val);
+}
+
 inline bool FastParseDouble(const char* p, const char* end, double* out, const char** next) {
   const char* s = p;
   bool neg = false;
@@ -24,6 +44,12 @@ inline bool FastParseDouble(const char* p, const char* end, double* out, const c
   uint64_t mant = 0;
   int digits = 0;
   int exp10 = 0;
+  while (digits + 8 <= 19 && s + 8 <= end &&
+         EightDigits(*reinterpret_cast<const uint64_t*>(s))) {
+    mant = mant * 100000000ULL + ParseEightDigits(*reinterpret_cast<const uint64_t*>(s));
+    s += 8;
+    digits += 8;
+  }
   while (s < end && *s >= '0' && *s <= '9') {
     if (digits < 19) mant = mant * 10 + static_cast<uint64_t>(*s - '0');
     else ++exp10;
@@ -32,6 +58,19 @@ inline bool FastParseDouble(const char* p, const char* end, double* out, const c
   }
   if (s < end && *s == '.') {
     ++s;
+    // Leading zeros of the fraction carry no information: they only shift the
+    // decimal point. Counting them as significant digits used to exhaust the
+    // 19 digit budget for small values and pushed them onto the strtod
+    // fallback, which is the slowest path of the whole write phase. They may
+    // only be skipped while no significant digit has been seen yet.
+    while (s < end && *s == '0' && mant == 0) { --exp10; ++s; }
+    while (digits + 8 <= 19 && s + 8 <= end &&
+           EightDigits(*reinterpret_cast<const uint64_t*>(s))) {
+      mant = mant * 100000000ULL + ParseEightDigits(*reinterpret_cast<const uint64_t*>(s));
+      exp10 -= 8;
+      s += 8;
+      digits += 8;
+    }
     while (s < end && *s >= '0' && *s <= '9') {
       if (digits < 19) {
         mant = mant * 10 + static_cast<uint64_t>(*s - '0');

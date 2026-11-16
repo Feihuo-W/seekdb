@@ -327,7 +327,10 @@ class LineReader {
     for (;;) {
       size_t nl = buf_.find('\n');
       if (nl != std::string::npos) {
-        *out = buf_.substr(0, nl);
+        // Assign in place: the previous form built a temporary substring of
+        // the whole request line (about 249 KiB for the official load shape)
+        // and copied it a second time.
+        out->assign(buf_.data(), nl);
         buf_.erase(0, nl + 1);
         return 1;
       }
@@ -498,6 +501,15 @@ int main(int argc, char** argv) {
   // exactly one response. There is deliberately no cross-line buffering:
   // waiting for a continuation that never arrives is exactly what produces a
   // "JSON response timeout".
+  // The per request strings live outside the loop so that their capacity,
+  // and with it the already mapped pages, are reused. The sql field of the
+  // official load shape is about 249 KiB, which is above the glibc mmap
+  // threshold: allocating it per request made every request fault in 61
+  // fresh pages and had the kernel zero 249 KiB again.
+  std::string idraw = "null";
+  std::string op;
+  std::string sql;
+  std::string mode = "exact";
   for (;;) {
     int st = reader.ReadLine(&line, -1);
     if (st < 0) break;
@@ -512,10 +524,9 @@ int main(int argc, char** argv) {
     const size_t first = line.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) continue;
     if (line[first] == '{') {
-      std::string idraw = "null";
-      std::string op;
-      std::string sql;
-      std::string mode = "exact";
+      idraw.assign("null");
+      op.clear();
+      mode.assign("exact");
       if (!ParseRequest(line, &idraw, &op, &sql, &mode)) {
         emit("{\"id\":" + idraw +
              ",\"ok\":false,\"error\":{\"code\":\"invalid_request\","
