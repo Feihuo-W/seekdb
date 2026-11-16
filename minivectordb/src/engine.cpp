@@ -1935,11 +1935,13 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
             q8_cache_.valid_rows.assign(t->scan.size(), 1);
           }
           catch (const std::bad_alloc&) { valid = false; }
+          // C36: 缩放因子在循环外算一次（2^(-exponent)，精确可表示）。
+          const double code_scale = std::ldexp(1.0, -exponent);
           for (size_t i = 0; valid && i < t->scan.size(); ++i) {
             const RowView v = MakeView(t->scan[i].second);
             for (int j = 0; j < qdim; ++j) {
               float x; std::memcpy(&x, v.p + vec_off + size_t(j) * sizeof(float), sizeof(x));
-              if (!safe_q8::Encode(x, exponent, &q8_cache_.codes[i * size_t(qdim) + j])) {
+              if (!safe_q8::EncodeScaled(x, code_scale, &q8_cache_.codes[i * size_t(qdim) + j])) {
                 // Unrepresentable outliers are always exact; never read their codes.
                 q8_cache_.valid_rows[i] = 0;
                 q8_cache_.all_valid = false;
@@ -1959,8 +1961,10 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
       if (q8_cache_.ready) {
         query_codes.resize(qdim);
         use_q8 = true;
+        // C36: 同上，缩放因子提到循环外。
+        const double query_scale = std::ldexp(1.0, -q8_cache_.exponent);
         for (int j = 0; j < qdim; ++j)
-          if (!safe_q8::Encode(query_vec[j], q8_cache_.exponent, &query_codes[j])) { use_q8 = false; break; }
+          if (!safe_q8::EncodeScaled(query_vec[j], query_scale, &query_codes[j])) { use_q8 = false; break; }
       }
     }
 #endif

@@ -33,14 +33,23 @@ struct Cache {
 // Scaling a float32 by a power of two in the permitted exponent range is exact
 // in binary64 (including input subnormals). Round integer ties away from zero;
 // explicitly verify the half-step error instead of assuming a quantizer bound.
-inline bool Encode(float x, int exponent, int8_t* code) {
+// C36: 把缩放因子提出来，按 2 的幂缩放用一次乘法完成。
+// scale 必须是 2^(-exponent)，且 exponent 被调用方限制在 [-120,120] ⇒ scale 是
+// 精确可表示的 double，于是 x * scale 与 ldexp(x, -exponent) 逐位相同
+// （正常范围内都精确；溢出都得到 ±inf；下溢到次正规数时按 IEEE 754 做同样的
+// 就近舍入）。码值、剪枝判定与查询结果都不变。
+inline bool EncodeScaled(float x, double scale, int8_t* code) {
   if (!std::isfinite(x)) return false;
-  const double scaled = std::ldexp(static_cast<double>(x), -exponent);
+  const double scaled = static_cast<double>(x) * scale;
   if (!std::isfinite(scaled) || std::fabs(scaled) > 127.0) return false;
   const double rounded = std::round(scaled);
   if (std::fabs(scaled - rounded) > 0.5 || std::fabs(rounded) > 127.0) return false;
   *code = static_cast<int8_t>(rounded);
   return true;
+}
+
+inline bool Encode(float x, int exponent, int8_t* code) {
+  return EncodeScaled(x, std::ldexp(1.0, -exponent), code);
 }
 
 inline uint64_t SquaredScalar(const int8_t* a, const int8_t* b, int dim) {
