@@ -70,6 +70,60 @@ __attribute__((target("avx2"))) inline uint64_t SquaredAvx2(const int8_t* a, con
   return sum;
 }
 #endif
+// C30：与 SquaredAvx2 逐位等价的 AVX2 内核，归约显式写成 SIMD 树形，
+// 并提供"查询码已扩宽为 int16"的变体（省掉每行每 16 维一次 vpmovsxbw）。
+#if defined(__x86_64__)
+__attribute__((target("avx2"))) inline uint64_t SquaredAvx2Tree(
+    const int8_t* a, const int8_t* b, int dim) {
+  __m256i acc = _mm256_setzero_si256();
+  int i = 0;
+  for (; i + 16 <= dim; i += 16) {
+    const __m256i x = _mm256_cvtepi8_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i)));
+    const __m256i y = _mm256_cvtepi8_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(b + i)));
+    const __m256i d = _mm256_sub_epi16(x, y);
+    acc = _mm256_add_epi32(acc, _mm256_madd_epi16(d, d));
+  }
+  const __m256i wlo = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(acc));
+  const __m256i whi = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(acc, 1));
+  const __m256i sums = _mm256_add_epi64(wlo, whi);
+  __m128i pair = _mm_add_epi64(_mm256_castsi256_si128(sums),
+                               _mm256_extracti128_si256(sums, 1));
+  pair = _mm_add_epi64(pair, _mm_unpackhi_epi64(pair, pair));
+  uint64_t sum = static_cast<uint64_t>(_mm_cvtsi128_si64(pair));
+  for (; i < dim; ++i) { int d = int(a[i]) - int(b[i]); sum += unsigned(d * d); }
+  return sum;
+}
+// C30: 查询码已扩宽为 int16 的版本（dim 必须是 16 的整数倍，否则回退到 SquaredAvx2Tree）。
+__attribute__((target("avx2"))) inline void SquaredAvx2Tree2Wide(
+    const int8_t* a, const int8_t* b2, const int16_t* q16, int dim, uint64_t* out0,
+    uint64_t* out1) {
+  __m256i acc0 = _mm256_setzero_si256();
+  __m256i acc1 = _mm256_setzero_si256();
+  for (int i = 0; i < dim; i += 16) {
+    const __m256i y = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(q16 + i));
+    const __m256i x0 = _mm256_cvtepi8_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(a + i)));
+    const __m256i x1 = _mm256_cvtepi8_epi16(_mm_loadu_si128(reinterpret_cast<const __m128i*>(b2 + i)));
+    const __m256i d0 = _mm256_sub_epi16(x0, y);
+    const __m256i d1 = _mm256_sub_epi16(x1, y);
+    acc0 = _mm256_add_epi32(acc0, _mm256_madd_epi16(d0, d0));
+    acc1 = _mm256_add_epi32(acc1, _mm256_madd_epi16(d1, d1));
+  }
+  const __m256i wlo0 = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(acc0));
+  const __m256i whi0 = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(acc0, 1));
+  const __m256i sums0 = _mm256_add_epi64(wlo0, whi0);
+  __m128i pair0 = _mm_add_epi64(_mm256_castsi256_si128(sums0),
+                                _mm256_extracti128_si256(sums0, 1));
+  pair0 = _mm_add_epi64(pair0, _mm_unpackhi_epi64(pair0, pair0));
+  *out0 = static_cast<uint64_t>(_mm_cvtsi128_si64(pair0));
+  const __m256i wlo1 = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(acc1));
+  const __m256i whi1 = _mm256_cvtepi32_epi64(_mm256_extracti128_si256(acc1, 1));
+  const __m256i sums1 = _mm256_add_epi64(wlo1, whi1);
+  __m128i pair1 = _mm_add_epi64(_mm256_castsi256_si128(sums1),
+                                _mm256_extracti128_si256(sums1, 1));
+  pair1 = _mm_add_epi64(pair1, _mm_unpackhi_epi64(pair1, pair1));
+  *out1 = static_cast<uint64_t>(_mm_cvtsi128_si64(pair1));
+}
+#endif
 #if defined(__x86_64__)
 // Preconditions: 1<=dim<=4096; original signed codes are in [-127,127].
 // SSE2 sign-extension by unpacking each byte with its compare-generated sign.

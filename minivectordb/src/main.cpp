@@ -11,6 +11,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#endif
 // Protocol output uses C stdio, with immediate per-response flush.
 #include <string>
 #include <vector>
@@ -33,6 +36,91 @@ void OnSignal(int) {
 std::string Lower(std::string s) {
   for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   return s;
+}
+
+
+// ---- C31: 请求路径上的冗余拷贝 ----
+// 大小写不敏感地比较整个字符串（长度必须相同）。替代 Lower() 全量拷贝：
+// 只有 "quit"/"exit" 这种指令才会走到这里，长度只有 4。
+bool EqualsIgnoreCase(const std::string& s, const char* lit) {
+  size_t n = std::strlen(lit);
+  if (s.size() != n) return false;
+  for (size_t i = 0; i < n; ++i) {
+    if (std::tolower(static_cast<unsigned char>(s[i])) != lit[i]) return false;
+  }
+  return true;
+}
+
+// C35: 文本里是否出现 "--"（行注释标记）。
+// glibc 的 memmem 在"needle 首字符高频出现"的输入上走慢路径（官方写负载的
+// 向量文本里负号占约 4%），实测 154 µs/252 KB。这里自己写双字节比较：
+// AVX2 每次 32 字节、SSE2 每次 16 字节，语义与 memmem 完全一致。
+#if defined(__x86_64__)
+__attribute__((target("avx2"))) bool HasDoubleDashAvx2(const char* p, size_t n) {
+  const __m256i dash = _mm256_set1_epi8('-');
+  size_t i = 0;
+  for (; i + 32 <= n; i += 32) {
+    const __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i));
+    const __m256i w = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(p + i + 1));
+    const __m256i eq = _mm256_and_si256(_mm256_cmpeq_epi8(v, dash),
+                                        _mm256_cmpeq_epi8(w, dash));
+    if (_mm256_movemask_epi8(eq) != 0) return true;
+  }
+  for (; i + 1 < n; ++i) {
+    if (p[i] == '-' && p[i + 1] == '-') return true;
+  }
+  return false;
+}
+__attribute__((target("sse2"))) bool HasDoubleDashSse2(const char* p, size_t n) {
+  const __m128i dash = _mm_set1_epi8('-');
+  size_t i = 0;
+  for (; i + 16 <= n; i += 16) {
+    const __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i));
+    const __m128i w = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + i + 1));
+    const __m128i eq = _mm_and_si128(_mm_cmpeq_epi8(v, dash), _mm_cmpeq_epi8(w, dash));
+    if (_mm_movemask_epi8(eq) != 0) return true;
+  }
+  for (; i + 1 < n; ++i) {
+    if (p[i] == '-' && p[i + 1] == '-') return true;
+  }
+  return false;
+}
+#endif
+
+// 判断文本里是否出现 "--"。x86-64 上按 CPU 能力选 AVX2 / SSE2。
+bool HasDoubleDash(const char* p, size_t n) {
+#if defined(__x86_64__)
+  if (__builtin_cpu_supports("avx2")) return HasDoubleDashAvx2(p, n);
+  return HasDoubleDashSse2(p, n);
+#else
+  for (size_t i = 0; i + 1 < n; ++i) {
+    if (p[i] == '-' && p[i + 1] == '-') return true;
+  }
+  return false;
+#endif
+}
+
+// 判断这段文本是不是"单条简单语句"：没有分号、没有 -- / # / * 注释，
+// 且引号都闭合。这样的语句 SplitStatements 只会产出一条、且等于去空白后的
+// 全文，可以直接交给引擎，省掉逐字符拷贝。
+bool IsSimpleSingleStatement(const std::string& s) {
+  // C32: 只在确认语句里不含 ';'(多语句) '#'(行注释) '/'(块注释) "--"(行注释)
+  // 时才走"单条简单语句"快路径。用 memchr/memmem（SIMD 加速）代替逐字节扫描：
+  // 官方写负载的语句约 248 KB，逐字节扫描要 264 µs/请求。
+  // 判定比逐字节版本**更保守**：引号内的 ';' 与 '#' 现在一律回落到
+  // SplitStatements 路径（更慢但语义相同），因此行为不变。
+  const char* p = s.data();
+  const size_t n = s.size();
+  if (n == 0) return false;
+  if (std::memchr(p, ';', n) != nullptr) return false;
+  if (std::memchr(p, '#', n) != nullptr) return false;
+  if (std::memchr(p, '/', n) != nullptr) return false;
+  // C35: "--" 的查找换成 SIMD 双字节比较（glibc 的 memmem 在负号密集的
+  // 向量文本上走慢路径，实测 154 µs/252 KB，是整个判定的 91%）。
+  if (n >= 2) {
+    if (HasDoubleDash(p, n)) return false;
+  }
+  return true;
 }
 
 std::string Trim(const std::string& s) {
@@ -477,6 +565,11 @@ int main(int argc, char** argv) {
     }
   };
   auto run_stmts = [&](const std::string& text) {
+    // C31: 单条简单语句直接执行，省掉 SplitStatements 的逐字符拷贝
+    if (!text.empty() && IsSimpleSingleStatement(text)) {
+      run_stmt(text);
+      return;
+    }
     std::vector<std::string> stmts;
     SplitStatements(text, &stmts);
     if (stmts.empty()) {
@@ -551,7 +644,15 @@ int main(int argc, char** argv) {
     }
     // Legacy raw-SQL lines still use the original normalization. JSONL owns
     // its whitespace parsing and need not duplicate the entire request line.
-    std::string stmt = Trim(line);
+    // C31: 原地裁剪（line 每轮复用），不再为语句正文分配新串
+    {
+      const size_t b = line.find_first_not_of(" \t\r\n");
+      if (b == std::string::npos) continue;
+      const size_t e = line.find_last_not_of(" \t\r\n");
+      line.erase(0, b);
+      line.resize(e - b + 1);
+    }
+    const std::string& stmt = line;
     if (stmt[0] == '#') continue;
     if (stmt.rfind("--", 0) == 0) {
       std::string rest = Lower(Trim(stmt.substr(2)));
@@ -573,8 +674,8 @@ int main(int argc, char** argv) {
       }
       continue;
     }
-    std::string low = Lower(stmt);
-    if (low == "quit" || low == "exit") break;
+    // C31: 只有可能是指令的前 4 个字符才做大小写不敏感比较
+    if (EqualsIgnoreCase(stmt, "quit") || EqualsIgnoreCase(stmt, "exit")) break;
     run_stmts(stmt);
   }
 

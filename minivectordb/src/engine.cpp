@@ -93,43 +93,55 @@ uint64_t Utf8CodePoints(const std::string& s) {
 // 与旧实现等价（旧版先产出 double 数组再逐个转 float32），但省掉了中间
 // double 向量的分配与拷贝——实测这是写入期与查询期都在付的固定开销。
 bool ParseVecText(const std::string& text, std::vector<float>* out) {
-  size_t i = 0;
+  // C33: 原来每解析一个数要调用两次 std::isspace（libc 的 locale 表实现，
+  // 每次都是一次函数调用）。程序从不调用 setlocale，所以 C locale 生效，
+  // isspace 恰好匹配 ' ' 与 \t\n\v\f\r —— 直接内联比较，语义一致。
+  // 同时把 data()/size() 提到循环外，避免每次重新取。
+  const char* p = text.data();
+  const char* const end = p + text.size();
   auto skip = [&]() {
-    while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
-  };
-  skip();
-  if (i >= text.size() || text[i] != '[') return false;
-  ++i;
-  while (true) {
-    skip();
-    if (i < text.size() && text[i] == ']') {
-      ++i;
+    while (p < end) {
+      const char c = *p;
+      if (c == ' ' || (c >= '\t' && c <= '\r')) {
+        ++p;
+        continue;
+      }
       break;
     }
-    const char* start = text.c_str() + i;
+  };
+  skip();
+  if (p >= end || *p != '[') return false;
+  ++p;
+  while (true) {
+    skip();
+    if (p < end && *p == ']') {
+      ++p;
+      break;
+    }
+    const char* start = p;
     const char* next = nullptr;
     double v = 0;
-    if (!FastParseDouble(start, text.c_str() + text.size(), &v, &next)) {
+    if (!FastParseDouble(start, end, &v, &next)) {
       char* endp = nullptr;
       v = std::strtod(start, &endp);
       if (endp == start) return false;
       next = endp;
     }
-    i = static_cast<size_t>(next - text.c_str());
+    p = next;
     out->push_back(static_cast<float>(v));
     skip();
-    if (i < text.size() && text[i] == ',') {
-      ++i;
+    if (p < end && *p == ',') {
+      ++p;
       continue;
     }
-    if (i < text.size() && text[i] == ']') {
-      ++i;
+    if (p < end && *p == ']') {
+      ++p;
       break;
     }
     return false;
   }
   skip();
-  return i == text.size();
+  return p == end;
 }
 
 bool WriteAll(int fd, const void* data, size_t n) {
@@ -965,9 +977,15 @@ bool Engine::CommitOverlay() {
     bool del;
   };
   std::vector<Applied> applied;
+  size_t total_rows = 0;
+  for (const auto& [tid, rows] : overlay_) total_rows += rows.size();
+  applied.reserve(total_rows);
+  // C33: payload 缓冲提到循环外复用，每行 clear() 后写入同样的字节。
+  std::string payload;
+  payload.reserve(1024);
   for (const auto& [tid, rows] : overlay_) {
     for (const auto& [pk, row] : rows) {
-      std::string payload;
+      payload.clear();
       PutU32(payload, tid);
       PutI64(payload, pk);
       uint64_t off = 0;
@@ -1135,11 +1153,20 @@ std::string Engine::ExecInsert(const Statement& st) {
   auto overlay_it = overlay_.find(s.id);
   std::map<int64_t, OverlayRow>* ov = overlay_it == overlay_.end() ? nullptr : &overlay_it->second;
   std::vector<std::pair<int64_t, std::string>> ready;
+  ready.reserve(st.rows.size());
   std::unordered_set<int64_t> seen;
+  // C33: 列值缓冲与 present 标记提到行循环外复用，避免每行三次堆分配。
+  // 每行开始时把 s / v 清空、present 复位，所以绑定结果与原来逐行新建
+  // 空缓冲完全一样。
+  std::vector<ColumnValue> vals(s.cols.size());
+  std::vector<bool> present(s.cols.size(), false);
   for (const auto& row : st.rows) {
     if (row.size() != targets.size()) return JsonError("column_count_mismatch");
-    std::vector<ColumnValue> vals(s.cols.size());
-    std::vector<bool> present(s.cols.size(), false);
+    for (size_t c = 0; c < s.cols.size(); ++c) {
+      vals[c].s.clear();
+      vals[c].v.clear();
+      present[c] = false;
+    }
     for (size_t i = 0; i < targets.size(); ++i) {
       std::string err;
       if (!BindLiteral(s.cols[targets[i]], row[i], &vals[targets[i]], err))
@@ -1225,6 +1252,60 @@ inline void ExactDistanceBatch(const uint8_t* const* cols, const float* q, size_
     }
     out[c] = sum;
   }
+}
+
+// C30: 整段筛选循环进按 ISA 专用的函数；一次处理两行，查询码预扩宽后被两行共用。
+#if defined(__x86_64__)
+template <typename Sink>
+__attribute__((target("avx2"))) static void ScanRowsAvx2(
+    const int8_t* codes, size_t nrows, int qdim, const int8_t* qcodes,
+    const uint64_t* cutoff, uint64_t* screened_out, uint64_t* pruned_out, Sink&& on_survivor) {
+  const size_t stride = static_cast<size_t>(qdim);
+  uint64_t screened = 0, pruned = 0;
+  if ((qdim & 15) == 0) {
+    // 查询码预扩宽为 int16（每查询一次）
+    alignas(32) int16_t q16[4096];
+    for (int j = 0; j < qdim; ++j) q16[j] = qcodes[j];
+    size_t i = 0;
+    for (; i + 1 < nrows; i += 2) {
+      ++screened; ++screened;
+      uint64_t sq0 = 0, sq1 = 0;
+      vdb::safe_q8::SquaredAvx2Tree2Wide(codes + i * stride, codes + (i + 1) * stride, q16, qdim,
+                                          &sq0, &sq1);
+      if (sq0 > *cutoff) { ++pruned; } else { on_survivor(i); }
+      if (sq1 > *cutoff) { ++pruned; } else { on_survivor(i + 1); }
+    }
+    for (; i < nrows; ++i) {  // 奇数尾巴
+      ++screened;
+      const uint64_t sq = vdb::safe_q8::SquaredAvx2Tree(codes + i * stride, qcodes, qdim);
+      if (sq > *cutoff) { ++pruned; } else { on_survivor(i); }
+    }
+  } else {
+    for (size_t i = 0; i < nrows; ++i) {
+      ++screened;
+      const uint64_t sq = vdb::safe_q8::SquaredAvx2Tree(codes + i * stride, qcodes, qdim);
+      if (sq > *cutoff) { ++pruned; } else { on_survivor(i); }
+    }
+  }
+  *screened_out = screened;
+  *pruned_out = pruned;
+}
+#endif
+
+template <typename Sink>
+static void ScanRowsGeneric(
+    const int8_t* codes, size_t nrows, int qdim, const int8_t* qcodes,
+    const uint64_t* cutoff, uint64_t* screened_out, uint64_t* pruned_out, Sink&& on_survivor) {
+  const size_t stride = static_cast<size_t>(qdim);
+  uint64_t screened = 0, pruned = 0;
+  for (size_t i = 0; i < nrows; ++i) {
+    ++screened;
+    const uint64_t code_sq = vdb::safe_q8::SquaredFor<false>(codes + i * stride, qcodes, qdim);
+    if (code_sq > *cutoff) { ++pruned; continue; }
+    on_survivor(i);
+  }
+  *screened_out = screened;
+  *pruned_out = pruned;
 }
 
 std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
@@ -2000,30 +2081,85 @@ std::string Engine::ExecSelect(const Statement& st, const OutSink& sink) {
           for (size_t c = 0; c < pend_n; ++c) consider_known(pend[c].pk, pend[c].v, dists[c]);
           pend_n = 0;
         };
-        for (size_t i = 0; i < t->scan.size(); ++i) {
-          ++q8_screened;
-          if constexpr (!decltype(all_rows_valid)::value) {
+        if constexpr (decltype(all_rows_valid)::value) {
+          // C30：整段筛选循环进 ISA 专用函数（见上方 ScanRowsAvx2）。
+          const int8_t* const codes = q8_cache_.codes.data();
+          const int8_t* const qcodes = query_codes.data();
+          uint64_t screened = 0, pruned = 0;
+#if defined(__x86_64__)
+          if constexpr (decltype(avx2_tag)::value) {
+            ScanRowsAvx2(codes, t->scan.size(), qdim, qcodes, &q8_cutoff, &screened, &pruned,
+                         [&](size_t i) {
+              RowView v = MakeView(t->scan[i].second);
+              v.s = &s;
+              if (!v.Valid()) return;
+              const uint8_t* col = nullptr;
+              uint32_t col_len = 0;
+              if (!ColAt(v, s, dist_col, &col, &col_len)) return;
+              pend[pend_n].pk = t->scan[i].first;
+              pend[pend_n].v = v;
+              pend[pend_n].col = col;
+              ++pend_n;
+              if (pend_n == 8) flush_pending();
+            });
+          } else {
+            ScanRowsGeneric(codes, t->scan.size(), qdim, qcodes, &q8_cutoff, &screened, &pruned,
+                            [&](size_t i) {
+              RowView v = MakeView(t->scan[i].second);
+              v.s = &s;
+              if (!v.Valid()) return;
+              const uint8_t* col = nullptr;
+              uint32_t col_len = 0;
+              if (!ColAt(v, s, dist_col, &col, &col_len)) return;
+              pend[pend_n].pk = t->scan[i].first;
+              pend[pend_n].v = v;
+              pend[pend_n].col = col;
+              ++pend_n;
+              if (pend_n == 8) flush_pending();
+            });
+          }
+#else
+          ScanRowsGeneric(codes, t->scan.size(), qdim, qcodes, &q8_cutoff, &screened, &pruned,
+                          [&](size_t i) {
+            RowView v = MakeView(t->scan[i].second);
+            v.s = &s;
+            if (!v.Valid()) return;
+            const uint8_t* col = nullptr;
+            uint32_t col_len = 0;
+            if (!ColAt(v, s, dist_col, &col, &col_len)) return;
+            pend[pend_n].pk = t->scan[i].first;
+            pend[pend_n].v = v;
+            pend[pend_n].col = col;
+            ++pend_n;
+            if (pend_n == 8) flush_pending();
+          });
+#endif
+          q8_screened += screened;
+          q8_pruned += pruned;
+        } else {
+          for (size_t i = 0; i < t->scan.size(); ++i) {
+            ++q8_screened;
             if (!q8_cache_.valid_rows[i]) {
               RowView v = MakeView(t->scan[i].second);
               v.s = &s;
               if (v.Valid()) consider(t->scan[i].first, v);
               continue;
             }
+            const uint64_t code_sq = safe_q8::SquaredFor<decltype(avx2_tag)::value>(
+                q8_cache_.codes.data() + i * size_t(qdim), query_codes.data(), qdim);
+            if (code_sq > q8_cutoff) { ++q8_pruned; continue; }
+            RowView v = MakeView(t->scan[i].second);
+            v.s = &s;
+            if (!v.Valid()) continue;
+            const uint8_t* col = nullptr;
+            uint32_t col_len = 0;
+            if (!ColAt(v, s, dist_col, &col, &col_len)) continue;
+            pend[pend_n].pk = t->scan[i].first;
+            pend[pend_n].v = v;
+            pend[pend_n].col = col;
+            ++pend_n;
+            if (pend_n == 8) flush_pending();
           }
-          const uint64_t code_sq = safe_q8::SquaredFor<decltype(avx2_tag)::value>(
-              q8_cache_.codes.data() + i * size_t(qdim), query_codes.data(), qdim);
-          if (code_sq > q8_cutoff) { ++q8_pruned; continue; }
-          RowView v = MakeView(t->scan[i].second);
-          v.s = &s;
-          if (!v.Valid()) continue;
-          const uint8_t* col = nullptr;
-          uint32_t col_len = 0;
-          if (!ColAt(v, s, dist_col, &col, &col_len)) continue;
-          pend[pend_n].pk = t->scan[i].first;
-          pend[pend_n].v = v;
-          pend[pend_n].col = col;
-          ++pend_n;
-          if (pend_n == 8) flush_pending();
         }
         flush_pending();
       };
