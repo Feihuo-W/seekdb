@@ -19,7 +19,12 @@ docker build -t minivectordb .
 docker run --rm -i -v minivectordb-data:/data --cpus=2 --memory=2g minivectordb
 ```
 
-- 语言：C++17，无第三方运行时依赖；`Dockerfile` 在镜像内从源码构建。
+- 语言：C++17（ISO/IEC 14882:2017），无第三方运行时依赖；`Dockerfile` 在镜像内从源码构建。
+- 基础镜像：`ubuntu:24.04`（实测构建环境 Ubuntu 24.04.5 LTS）。
+- 编译器：g++ 13.3.0（`g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1)`），构建类型 `Release`
+  （`-O3 -DNDEBUG`），语言标准 `-std=c++17`，静态链接 `-static`。
+- 构建工具：CMake 3.28.3、GNU Make 4.3（`Dockerfile` 中由 apt 安装，基础镜像锁定版本）。
+- 目标平台：Linux x86_64；运行时镜像只携带静态链接二进制，不需要额外运行库。
 - 数据目录：`/data`（可用 `--data <dir>` 或 `MINIVECTORDB_DATA` 覆盖）。
 - 日志只写 stderr；stdout 只输出协议报文（含启动握手 `{"type":"ready"}`）。
 - 正常关闭：`shutdown` 请求、stdin EOF 或 SIGTERM/SIGINT，均回滚未提交事务并落盘；
@@ -59,15 +64,17 @@ docker run --rm -i -v minivectordb-data:/data --cpus=2 --memory=2g minivectordb
 
 ```sql
 CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(8), embedding VECTOR(3));
-INSERT INTO docs VALUES (1, '甲', '[0,0]'), (2, '乙', '[3,4]');
+INSERT INTO docs VALUES (1, '甲', '[0,0,0]'), (2, '乙', '[3,4,0]'), (3, '甲', '[6,8,0]');
 SELECT id, category FROM docs WHERE id >= 1 AND category = '甲';
 UPDATE docs SET category = '丙' WHERE id = 1;
 DELETE FROM docs WHERE id = 2;
-SELECT id, L2_DISTANCE(embedding, '[0,0]') AS distance
+SELECT id, L2_DISTANCE(embedding, '[0,0,0]') AS distance
   FROM docs WHERE category = '甲' ORDER BY distance LIMIT 10;
 CREATE VECTOR INDEX docs_vec ON docs(embedding);
 BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
 ```
+
+向量字面量的维度必须与列声明的 `VECTOR(n)` 一致，维度不符返回 `dimension_mismatch`。
 
 - 表：一个 BIGINT 主键，每表最多一个 VECTOR(n) 列；`VARCHAR(n)` 按 Unicode 码点数限长，
   比较按码点顺序（UTF-8 字节序一致）。
@@ -112,6 +119,71 @@ BEGIN; UPDATE docs SET category = '丁' WHERE id = 1; ROLLBACK;
 - 单连接、单显式事务；不支持 NULL/JOIN/聚合/子查询/ALTER/主键更新。
 - 主键到偏移的映射常驻内存，收益是随机点查与扫描寻址快，代价是行数极大时映射本身
   仍占用内存。
+
+## 完整操作示例
+
+下面是从**空数据目录**开始的一次完整操作，报文为实际运行输出，未经手工改写。左侧箭头
+`→` 是写入 stdin 的请求，右侧箭头 `←` 是程序返回到 stdout 的响应；每条请求恰好对应
+一行响应，编号逐条递增。示例开始前数据目录为空。
+
+### 第一段：写入、查询、提交、回滚、关闭
+
+```text
+← {"type":"ready"}
+→ {"id":1,"op":"execute","sql":"CREATE TABLE docs (id BIGINT PRIMARY KEY, category VARCHAR(8), embedding VECTOR(3));","search_mode":"exact"}
+← {"id":1,"ok":true}
+→ {"id":2,"op":"execute","sql":"INSERT INTO docs VALUES (1, '甲', '[0,0,0]'), (2, '乙', '[3,4,0]'), (3, '甲', '[6,8,0]');","search_mode":"exact"}
+← {"id":2,"ok":true,"affected_rows":3}
+→ {"id":3,"op":"execute","sql":"SELECT id, category FROM docs WHERE category = '甲' ORDER BY id;","search_mode":"exact"}
+← {"id":3,"ok":true,"columns":["id","category"],"rows":[[1,"甲"],[3,"甲"]]}
+→ {"id":4,"op":"execute","sql":"SELECT id, L2_DISTANCE(embedding, '[0,0,0]') AS distance FROM docs ORDER BY distance LIMIT 2;","search_mode":"exact"}
+← {"id":4,"ok":true,"columns":["id","distance"],"rows":[[1,0],[2,5]]}
+→ {"id":5,"op":"execute","sql":"BEGIN;","search_mode":"exact"}
+← {"id":5,"ok":true}
+→ {"id":6,"op":"execute","sql":"UPDATE docs SET category = '丙' WHERE id = 1;","search_mode":"exact"}
+← {"id":6,"ok":true,"affected_rows":1}
+→ {"id":7,"op":"execute","sql":"COMMIT;","search_mode":"exact"}
+← {"id":7,"ok":true}
+→ {"id":8,"op":"execute","sql":"SELECT id, category FROM docs WHERE id = 1;","search_mode":"exact"}
+← {"id":8,"ok":true,"columns":["id","category"],"rows":[[1,"丙"]]}
+→ {"id":9,"op":"execute","sql":"BEGIN;","search_mode":"exact"}
+← {"id":9,"ok":true}
+→ {"id":10,"op":"execute","sql":"DELETE FROM docs WHERE id = 3;","search_mode":"exact"}
+← {"id":10,"ok":true,"affected_rows":1}
+→ {"id":11,"op":"execute","sql":"ROLLBACK;","search_mode":"exact"}
+← {"id":11,"ok":true}
+→ {"id":12,"op":"execute","sql":"SELECT id, category FROM docs ORDER BY id;","search_mode":"exact"}
+← {"id":12,"ok":true,"columns":["id","category"],"rows":[[1,"丙"],[2,"乙"],[3,"甲"]]}
+→ {"id":13,"op":"shutdown"}
+← {"id":13,"ok":true}
+```
+
+### 第二段：重启同一数据目录
+
+进程退出后用同一个数据目录再次启动，已提交的改动保留，被回滚的改动不生效。
+
+```text
+← {"type":"ready"}
+→ {"id":14,"op":"execute","sql":"SELECT id, category FROM docs ORDER BY id;","search_mode":"exact"}
+← {"id":14,"ok":true,"columns":["id","category"],"rows":[[1,"丙"],[2,"乙"],[3,"甲"]]}
+→ {"id":15,"op":"shutdown"}
+← {"id":15,"ok":true}
+```
+
+### 步骤对应关系
+
+| 步骤 | 请求编号 | 请求 | 响应要点 |
+| --- | --- | --- | --- |
+| 写入 | id=1、id=2 | 建表并插入 3 行 | `affected_rows` 为 3 |
+| 普通查询 | id=3 | 等值过滤 + 主键升序 | 返回 id 1、3 两行 |
+| 向量检索 | id=4 | L2 距离排序取 Top2 | 距离 0 与 5，顺序正确 |
+| 提交 | id=5～id=8 | 事务内 UPDATE 后 COMMIT | 改动可见，id=1 变为"丙" |
+| 回滚 | id=9～id=12 | 事务内 DELETE 后 ROLLBACK | id=3 仍在，被删行未落盘 |
+| 重启 | id=13～id=15 | 关闭后重启同一目录 | 已提交改动保留 |
+
+数据目录在第一段结束后只有 `wal.log`（事务日志）。`snapshot.dat` 由增量压缩会话产出：
+WAL 超过 256 MiB 时，引擎启动一次压缩会话，把当前可见行重写为快照并原子替换
+（`snapshot.tmp` → `snapshot.dat`）。恢复时先加载快照，再顺序重放 WAL 中带 COMMIT 的事务。
 
 ## 本地自测
 
