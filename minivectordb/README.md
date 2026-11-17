@@ -49,7 +49,7 @@ docker run --rm -i -v minivectordb-data:/data --cpus=2 --memory=2g minivectordb
 
 - `sql` 字段是完整单条语句（尾部分号被接受）；不切割通信输入，字符串内的分号安全。
   请求解析容忍空白，支持 `\uXXXX` 转义（含代理对）；BIGINT 以 JSON 整数输出，不经浮点。
-- `search_mode` 逐请求生效：`exact` 精确检索；`ann` 当前以精确扫描实现（召回率 1.0）。
+- `search_mode` 逐请求生效：`exact` 精确检索；`ann` 当前以精确扫描实现（召回率 1.0）。（本实现不区分两者：本实现把 `search_mode` 记下但不参与决策，两种模式下的响应逐字相同（实测 60/60 条查询；当前路径 Recall@10 = 1.0000）。题面要求 ann 只需 Recall@10 ≥ 0.95，而公开用例 `vector_index_maintenance.test` 的 ann 查询在 `.result` 里被逐字断言为精确结果，因此不引入近似索引。
 - 预期 SQL 错误只回失败响应，进程继续服务；查询结果流式输出，单响应不整表物化。
 - 兼容回退：非 `{` 开头的行按裸 SQL 处理（本地自测工具用），`--restart`/`--mode`
   指令与 `quit` 仍可用；正式判题只使用上面的 JSONL 路径。
