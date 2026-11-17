@@ -25,6 +25,37 @@ using namespace sql;
 using namespace common;
 using namespace share::schema;
 
+// File table functions (read_csv/read_json/read_ndjson/read_parquet/glob) consume their
+// arguments while the statement is resolved, so the arguments have to stay literal.
+// If such a statement went through parameterization the resolver would only see a '?'
+// and reject the query with a syntax error, hence these statements are executed as is.
+static bool sql_has_file_table_func(const ObString &sql)
+{
+  static const char *const names[] = {"read_csv", "read_json", "read_ndjson",
+                                      "read_parquet", "glob("};
+  const int64_t name_cnt = static_cast<int64_t>(sizeof(names) / sizeof(names[0]));
+  bool found = false;
+  for (int64_t n = 0; !found && n < name_cnt; ++n) {
+    const int64_t tlen = static_cast<int64_t>(strlen(names[n]));
+    for (int64_t i = 0; !found && i + tlen <= sql.length(); ++i) {
+      int64_t j = 0;
+      for (; j < tlen; ++j) {
+        char c = sql.ptr()[i + j];
+        if (c >= 'A' && c <= 'Z') {
+          c = static_cast<char>(c - 'A' + 'a');
+        }
+        if (c != names[n][j]) {
+          break;
+        }
+      }
+      if (j == tlen) {
+        found = true;
+      }
+    }
+  }
+  return found;
+}
+
 SqlInfo::SqlInfo() :
   total_(0),
   last_active_time_(0),
@@ -1544,6 +1575,8 @@ int ObSqlParameterization::formalize_fast_parameter_sql(ObIAllocator &allocator,
 
   if (OB_FAIL(ret)) {
     // do nothing
+  } else if (sql_has_file_table_func(src_sql)) {
+    dest_sql = src_sql;
   } else if (!is_contain_select && (!need_fast_parser(src_sql)
       || (ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     // do nothing
@@ -1601,7 +1634,9 @@ int ObSqlParameterization::formalize_sql_filter_hint(ObIAllocator &allocator,
   fp_ctx.is_format_ = true;
   ObArenaAllocator alloc(ObModIds::OB_SQL_PARSER);
   bool is_contain_select = (src_sql.length() > 6 && 0 == STRNCASECMP(src_sql.ptr(), "select", 6));
-  if (!is_contain_select && (!need_fast_parser(src_sql)
+  if (sql_has_file_table_func(src_sql)) {
+    dest_sql = src_sql;
+  } else if (!is_contain_select && (!need_fast_parser(src_sql)
       || (ObParser::is_pl_stmt(src_sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     // do nothing
   } else if (config::_ob_enable_fast_parser()) {
@@ -1654,7 +1689,10 @@ int ObSqlParameterization::fast_parser(ObIAllocator &allocator,
   bool is_call_procedure = false;
   bool need_full_parser = false;
   bool is_contain_select = (sql.length() > 6 && 0 == STRNCASECMP(sql.ptr(), "select", 6));
-  if (!is_contain_select && (!need_fast_parser(sql)
+  if (sql_has_file_table_func(sql)) {
+    // File table arguments must stay literal, so the statement is not parameterized.
+    (void)fp_result.pc_key_.name_.assign_ptr(sql.ptr(), sql.length());
+  } else if (!is_contain_select && (!need_fast_parser(sql)
     || (ObParser::is_pl_stmt(sql, nullptr, &is_call_procedure) && !is_call_procedure))) {
     (void)fp_result.pc_key_.name_.assign_ptr(sql.ptr(), sql.length());
   } else if (config::_ob_enable_fast_parser()) {

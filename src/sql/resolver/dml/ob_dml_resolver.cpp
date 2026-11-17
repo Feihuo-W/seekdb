@@ -4258,24 +4258,6 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
     }
     (void)format_specified;
 
-    // TEMP DIAGNOSTIC P4: report the argument loop outcome.
-    if (OB_FAIL(ret)) {
-      char diag_buf[192];
-      int64_t diag_pos = 0;
-      const ParseNode *diag_a0 = (T_EXPR_LIST == args_node->type_ && args_node->num_child_ > 0)
-                                     ? args_node->children_[0] : args_node;
-      (void)databuff_printf(diag_buf, sizeof(diag_buf), diag_pos,
-                            "P4LOOPFAIL ret=%d argstype=%d nargs=%d a0type=%d a0len=%d pathlen=%d",
-                            ret,
-                            static_cast<int>(args_node->type_),
-                            static_cast<int>(args_node->num_child_),
-                            NULL == diag_a0 ? -1 : static_cast<int>(diag_a0->type_),
-                            NULL == diag_a0 ? -1 : static_cast<int>(diag_a0->str_len_),
-                            static_cast<int>(file_path.length()));
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, diag_buf);
-    }
-
     // 校验 secure_file_priv 与路径
     ObString secure_file_priv;
     if (OB_FAIL(ret)) {
@@ -4410,22 +4392,6 @@ int ObDMLResolver::resolve_file_table_item(const ParseNode &parse_tree, TableIte
           }
         }
       }
-    }
-
-    // TEMP DIAGNOSTIC P5: argument parsing and path validation all succeeded.
-    if (OB_SUCC(ret)) {
-      char diag_buf[192];
-      int64_t diag_pos = 0;
-      ObString diag_priv;
-      (void)session_info_->get_secure_file_priv(diag_priv);
-      (void)databuff_printf(diag_buf, sizeof(diag_buf), diag_pos,
-                            "P5PATHOK pathlen=%d privlen=%d cols=%ld filelen=%ld",
-                            static_cast<int>(table_def->path_.length()),
-                            static_cast<int>(diag_priv.length()),
-                            static_cast<long>(table_def->column_names_.count()),
-                            static_cast<long>(table_def->file_size_));
-      ret = OB_NOT_SUPPORTED;
-      LOG_USER_ERROR(OB_NOT_SUPPORTED, diag_buf);
     }
 
     // 创建 TableItem
