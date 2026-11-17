@@ -771,7 +771,7 @@
     "command": "python3 env/mem_ab.py（交错 ABBA/BAAB 4 轮取中位）；chroot 等效 Docker 构建验证",
     "result": "见 prior_results.e11",
     "interpretation": "Agent 的分析：共享库映射页计入进程峰值；首轮 −10.1% 是墙钟噪声，交错复测为 +0.8%，因此不能作为结论。",
-    "student_involvement": "本实例无对应的学生原话，student_evidence 指向 student_answer 前 240 字；定稿文本逐字存于 student_answer 字段（student_evidence 指向其逐字引用）。",
+    "student_involvement": "本实例无单独的用户原话条目，student_evidence 指向 student_answer 前 240 字；学生本人撰写并定稿（已由学生本人逐条审阅确认）；定稿文本逐字存于 student_answer 字段。",
     "student_evidence": [
      {
       "pointer": "/session_20261114_16/experiments/7/student_answer",
